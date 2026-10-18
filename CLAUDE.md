@@ -101,7 +101,10 @@ explicitly asks for a public type.
   `glam::camera::rh::proj::directx` (right-handed, +Y up NDC, depth 0..1,
   which is wgpu's convention), already wrapped by `math::Camera`.
 - Tests: unit tests in-module under `#[cfg(test)]`; integration and golden
-  tests in `crates/shin-engine/tests/`. Every ticket says which test command
+  tests in `crates/shin-engine/tests/`. Tests never depend on wall-clock
+  time: a test that plays the simulation pauses it or steps the clock
+  explicitly, because CI's software GPU renders a frame hundreds of times
+  slower than a laptop. Every ticket says which test command
   proves its acceptance criteria.
 - Examples are the manual smoke test. Each rendering ticket adds or updates
   one example under `crates/shin-engine/examples/`.

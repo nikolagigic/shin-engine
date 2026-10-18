@@ -1618,6 +1618,12 @@ mod tests {
     /// GE-030: the viewport renders from the orbit camera while editing and
     /// from the scene camera while playing; Stop returns to the orbit view,
     /// and "View from scene camera" moves the orbit camera to match.
+    ///
+    /// The session is paused as soon as it starts: the play clock steps the
+    /// simulation by wall-clock frame time, and on a slow software GPU the
+    /// crates would fall and the moon would orbit between the frames, so
+    /// the playing view would differ from the static scene-camera view
+    /// for reasons unrelated to the camera.
     #[test]
     fn play_renders_from_the_scene_camera() -> anyhow::Result<()> {
         let (mut core, gpu, target, root, _) = editor("scene-camera-play")?;
@@ -1627,6 +1633,8 @@ mod tests {
         let total = orbit_view.pixels().count();
 
         core.try_run(Action::Play)?;
+        core.try_run(Action::Pause)?;
+        assert!(core.engine.play_state().is_paused());
         let playing_view = viewport(&mut core, &gpu, &target)?;
         let changed = differing(&orbit_view, &playing_view);
         assert!(
