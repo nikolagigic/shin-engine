@@ -220,8 +220,10 @@ impl EcsGame {
 
     /// The GPU-independent half of [`Game::render`]: updates `frame_dt`
     /// and `alpha` in [`Time`], runs the frame systems and then
-    /// [`frame_stats_system`], ends the input frame, and rebuilds the
-    /// window title if a second has passed since the last rebuild.
+    /// [`frame_stats_system`] and [`ecs::propagate_transforms`] (so the
+    /// render callback sees up-to-date world transforms), ends the input
+    /// frame, and rebuilds the window title if a second has passed since
+    /// the last rebuild.
     fn begin_frame(&mut self, alpha: f64) {
         let now = Instant::now();
         let frame_dt = self
@@ -234,9 +236,10 @@ impl EcsGame {
         time.alpha = alpha;
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
-        // Run directly rather than via the schedule so it stays last even
+        // Run directly rather than via the schedule so they stay last even
         // when user code adds frame systems after `new`.
         frame_stats_system(&mut self.world, &mut self.resources);
+        ecs::propagate_transforms(&mut self.world, &mut self.resources);
         if let Some(input) = self.resources.get_mut::<InputState>() {
             input.end_frame();
         }

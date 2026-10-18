@@ -6,7 +6,9 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only) and `transform`.
+//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
+//!   the parent), and `world_transform` (read-only; a copy, as of the
+//!   start of the step).
 //! - `time()`: simulated seconds since play started.
 //!
 //! Numbers are Rhai's `FLOAT` (`f64`) and are stored as `f32`; setters
@@ -34,8 +36,11 @@ pub(crate) struct ScriptEntity {
     pub(crate) id: INT,
     /// Its [`crate::ecs::Name`], or empty.
     pub(crate) name: String,
-    /// Its transform, written back after the call.
+    /// Its transform (local to its parent), written back after the call.
     pub(crate) transform: ScriptTransform,
+    /// Its world-space transform at the start of the step (GE-031);
+    /// scripts read it as `world_transform` and cannot change it.
+    pub(crate) world: Transform,
 }
 
 /// Registers every script type and function on `engine`; `time()` reads
@@ -119,6 +124,10 @@ fn register_entity(engine: &mut Engine) {
         .register_type_with_name::<ScriptEntity>("Entity")
         .register_get("id", |e: &mut ScriptEntity| e.id)
         .register_get("name", |e: &mut ScriptEntity| e.name.clone())
+        // A fresh copy each read: writing to it changes nothing.
+        .register_get("world_transform", |e: &mut ScriptEntity| {
+            ScriptTransform(Rc::new(RefCell::new(e.world)))
+        })
         .register_get_set(
             "transform",
             |e: &mut ScriptEntity| e.transform.clone(),

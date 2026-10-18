@@ -310,6 +310,7 @@ fn starter_scene() -> SceneFile {
         color: Some(color),
         texture: None,
         script: None,
+        children: Vec::new(),
     };
     SceneFile {
         camera: Some(CameraDesc {

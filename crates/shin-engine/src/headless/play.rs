@@ -12,12 +12,14 @@
 //! valid), and restores [`Time`].
 //!
 //! Only what a scene file holds survives a play session: entities with a
-//! [`Transform`] (their transform, mesh, colour, texture, name, and
-//! script), the
+//! [`Transform`] (their transform, mesh, colour, texture, name, script,
+//! and parent), the
 //! camera, and the light. Other components and entities without a
 //! transform are gone after [`Headless::stop`].
 //!
 //! Tools: [`register_tools`] adds `sim.play`, `sim.pause`, and `sim.stop`.
+
+use std::collections::HashMap;
 
 use anyhow::Context as _;
 use schemars::JsonSchema;
@@ -25,7 +27,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::Headless;
-use crate::ecs::{Entity, Name, Time};
+use crate::ecs::{Children, Entity, Name, Parent, Time};
 use crate::math::Transform;
 use crate::render::MeshInstance;
 use crate::scene::{self, SceneFile};
@@ -76,7 +78,8 @@ impl PlayState {
 pub struct PlaySnapshot {
     /// The scene as it was, in scene file form.
     scene: SceneFile,
-    /// The id of each entity in `scene.entities`, in the same order.
+    /// The id of each entity in `scene`, in the order [`scene::apply_entities`]
+    /// spawns them (depth first).
     ids: Vec<Entity>,
     /// The [`Time`] resource as it was.
     time: Time,
@@ -122,16 +125,8 @@ impl Headless {
             *paused = false;
             return Ok(());
         }
-        let scene = SceneFile::capture(&self.world, &self.resources)
+        let (scene, ids) = SceneFile::capture_with_ids(&self.world, &self.resources)
             .context("cannot play: the scene cannot be snapshotted")?;
-        // `capture` lists entities with a transform in id order.
-        let mut ids: Vec<Entity> = self
-            .world
-            .query::<(Entity, &Transform)>()
-            .iter()
-            .map(|(entity, _)| entity)
-            .collect();
-        ids.sort_by_key(|entity| entity.to_bits());
         let time = self.resources.get::<Time>().copied().unwrap_or_default();
         self.resources.insert(PlayState::Playing {
             snapshot: Box::new(PlaySnapshot { scene, ids, time }),
@@ -165,7 +160,7 @@ impl Headless {
             return Ok(false);
         };
         let snapshot = snapshot.clone();
-        scene::apply(
+        let spawned = scene::apply_entities(
             &mut self.world,
             &mut self.resources,
             &self.gpu.device,
@@ -173,7 +168,7 @@ impl Headless {
             &snapshot.scene,
         )
         .context("cannot stop: the play snapshot did not load")?;
-        restore_ids(&mut self.world, &snapshot.ids)?;
+        restore_ids(&mut self.world, &spawned, &snapshot.ids)?;
         self.resources.insert(snapshot.time);
         self.resources.insert(PlayState::Edit);
         log::info!("stop");
@@ -181,35 +176,55 @@ impl Headless {
     }
 }
 
-/// Respawns the entities [`scene::apply`] just spawned (in spawn order)
-/// under `ids`, one for one, keeping their scene components.
-fn restore_ids(world: &mut crate::ecs::World, ids: &[Entity]) -> anyhow::Result<()> {
+/// Respawns `spawned` (what [`scene::apply_entities`] just created) under
+/// `ids`, one for one, keeping their scene components; [`Parent`] and
+/// [`Children`] links are rewritten to the restored ids.
+fn restore_ids(
+    world: &mut crate::ecs::World,
+    spawned: &[Entity],
+    ids: &[Entity],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        spawned.len() == ids.len(),
+        "the play snapshot has {} entities but {} ids",
+        spawned.len(),
+        ids.len()
+    );
+    let old_id: HashMap<Entity, Entity> =
+        spawned.iter().copied().zip(ids.iter().copied()).collect();
+    let remap = |entity: Entity| old_id.get(&entity).copied().unwrap_or(entity);
     type Row = (
         Transform,
         Option<MeshInstance>,
         Option<Name>,
         Option<Script>,
+        Option<Parent>,
+        Option<Children>,
     );
-    let mut rows: Vec<(u64, Row)> = world
-        .query::<(
-            Entity,
-            &Transform,
-            Option<&MeshInstance>,
-            Option<&Name>,
-            Option<&Script>,
-        )>()
+    let rows: Vec<Row> = spawned
         .iter()
-        .map(|(e, t, i, n, s)| (e.to_bits().get(), (*t, i.copied(), n.cloned(), s.cloned())))
+        .map(|&entity| {
+            (
+                world
+                    .get::<&Transform>(entity)
+                    .map(|t| *t)
+                    .unwrap_or_default(),
+                world.get::<&MeshInstance>(entity).ok().map(|i| *i),
+                world.get::<&Name>(entity).ok().map(|n| (*n).clone()),
+                world.get::<&Script>(entity).ok().map(|s| (*s).clone()),
+                world
+                    .get::<&Parent>(entity)
+                    .ok()
+                    .map(|p| Parent(remap(p.0))),
+                world
+                    .get::<&Children>(entity)
+                    .ok()
+                    .map(|c| Children(c.0.iter().map(|&child| remap(child)).collect())),
+            )
+        })
         .collect();
-    anyhow::ensure!(
-        rows.len() == ids.len(),
-        "the play snapshot has {} entities but {} ids",
-        rows.len(),
-        ids.len()
-    );
-    rows.sort_by_key(|(bits, _)| *bits);
     world.clear();
-    for (&id, (_, (transform, instance, name, script))) in ids.iter().zip(rows) {
+    for (&id, (transform, instance, name, script, parent, children)) in ids.iter().zip(rows) {
         let mut builder = hecs::EntityBuilder::new();
         builder.add(transform);
         if let Some(instance) = instance {
@@ -220,6 +235,12 @@ fn restore_ids(world: &mut crate::ecs::World, ids: &[Entity]) -> anyhow::Result<
         }
         if let Some(script) = script {
             builder.add(script);
+        }
+        if let Some(parent) = parent {
+            builder.add(parent);
+        }
+        if let Some(children) = children {
+            builder.add(children);
         }
         world.spawn_at(id, builder.build());
     }
@@ -384,6 +405,46 @@ mod tests {
         assert_eq!(time.fixed_steps, time_before.fixed_steps);
         assert_eq!(time.elapsed, time_before.elapsed);
         assert!(!engine.play_state().is_playing());
+        Ok(())
+    }
+
+    /// GE-031: parent links survive play and stop, under the old ids.
+    #[test]
+    fn hierarchy_survives_play_and_stop() -> anyhow::Result<()> {
+        let reg = ToolRegistry::with_engine_tools();
+        let (mut engine, moon) = orbit_engine(&reg)?;
+        let cube = engine
+            .world
+            .query::<(Entity, &Name)>()
+            .iter()
+            .find(|(_, n)| n.0 == "cube")
+            .map(|(e, _)| e)
+            .unwrap();
+        reg.call(
+            &mut engine,
+            "entity.set_parent",
+            json!({ "entity": moon.to_bits().get(), "parent": cube.to_bits().get() }),
+        )?;
+        let local_before = *engine.world.get::<&Transform>(moon)?;
+        let world_before = crate::ecs::world_transform(&engine.world, moon);
+
+        call(&reg, &mut engine, "sim.play")?;
+        engine.step(30);
+        assert_ne!(*engine.world.get::<&Transform>(moon)?, local_before);
+        call(&reg, &mut engine, "sim.stop")?;
+
+        assert_eq!(
+            engine.world.get::<&Parent>(moon)?.0,
+            cube,
+            "same ids, same link"
+        );
+        assert_eq!(engine.world.get::<&Children>(cube)?.0, vec![moon]);
+        assert_eq!(*engine.world.get::<&Transform>(moon)?, local_before);
+        assert_eq!(
+            crate::ecs::world_transform(&engine.world, moon),
+            world_before
+        );
+        assert_eq!(engine.world.len(), 2);
         Ok(())
     }
 

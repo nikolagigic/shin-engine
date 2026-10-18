@@ -11,11 +11,12 @@
 //! }
 //! ```
 //!
-//! `entity` has `id`, `name`, and `transform` (with `translation`,
-//! `rotation`, and `scale`); `dt` is the fixed step in seconds; `time()` is
-//! the simulated seconds since play started. Changes to `entity.transform`
-//! are written back to the entity after the call. Scripts cannot spawn
-//! entities or call each other.
+//! `entity` has `id`, `name`, `transform` (with `translation`, `rotation`,
+//! and `scale`, local to the entity's parent), and `world_transform` (the
+//! same fields in world space, read-only); `dt` is the fixed step in
+//! seconds; `time()` is the simulated seconds since play started. Changes
+//! to `entity.transform` are written back to the entity after the call.
+//! Scripts cannot spawn entities or call each other.
 //!
 //! Only `update` (and the functions it calls) runs; statements outside
 //! functions do not. Rhai functions cannot see outer variables, so keep
@@ -32,7 +33,8 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only) and `transform`.
+//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
+//!   the parent, written back), and `world_transform` (read-only).
 //! - `time()`: simulated seconds since play started.
 //!
 //! Numbers are `f64` in scripts and `f32` in the engine; vector setters
@@ -384,6 +386,11 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
         return;
     }
     scripted.sort_by_key(|(entity, ..)| entity.to_bits());
+    // World transforms as of the start of the step, before any script runs.
+    let worlds: Vec<Transform> = scripted
+        .iter()
+        .map(|(entity, ..)| crate::ecs::world_transform(world, *entity))
+        .collect();
 
     let base = script_base(res);
     if res.get::<ScriptEngine>().is_none() {
@@ -392,11 +399,12 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
     let scripts = res.expect_mut::<ScriptEngine>();
     scripts.reload_changed(&base);
     scripts.clock.set(t);
-    for (entity, path, transform, name) in scripted {
+    for ((entity, path, transform, name), world_space) in scripted.into_iter().zip(worlds) {
         let handle = ScriptEntity {
             id: entity.to_bits().get() as rhai::INT,
             name,
             transform: ScriptTransform(Rc::new(RefCell::new(transform))),
+            world: world_space,
         };
         if let Some(updated) = scripts.run(&path, &base, handle, time.fixed_dt)
             && let Ok(mut transform) = world.get::<&mut Transform>(entity)

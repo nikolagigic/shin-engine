@@ -80,7 +80,7 @@ fn tools_scene_roundtrip() -> anyhow::Result<()> {
             "entity.despawn",
             json!({ "entity": entity }),
         );
-        assert_eq!(out, json!({ "ok": true }));
+        assert_eq!(out, json!({ "ok": true, "removed": 1 }));
     }
     let empty = render_frame(&reg, &mut engine);
     assert!(
