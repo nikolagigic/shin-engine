@@ -49,6 +49,11 @@ ron = "0.12"
 toml = "1.1"
 clap = { version = "4.6", features = ["derive"] }
 
+# Milestone 3 (ADR 0010): physics, audio, gamepads, viewport gizmos
+kira = "0.12"
+gilrs = "0.11"
+transform-gizmo-egui = "0.11"
+
 [profile.dev]
 opt-level = 1            # keep debug builds usable for a real-time loop
 
