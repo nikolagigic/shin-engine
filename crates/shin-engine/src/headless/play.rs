@@ -384,10 +384,31 @@ mod tests {
 
     /// The ticket's registry test: play, step (elapsed and the moon move),
     /// stop: transforms equal the pre-play scene file, ids are kept.
+    /// GE-034: the cube is a dynamic body, which falls while playing and is
+    /// back in place, with its body, after stop.
     #[test]
     fn sim_play_step_stop_restores_the_scene() -> anyhow::Result<()> {
         let reg = ToolRegistry::with_engine_tools();
         let (mut engine, moon) = orbit_engine(&reg)?;
+        let cube = engine
+            .world
+            .query::<(Entity, &Name)>()
+            .iter()
+            .find(|(_, n)| n.0 == "cube")
+            .map(|(e, _)| e)
+            .context("no cube")?;
+        let id = cube.to_bits().get();
+        reg.call(
+            &mut engine,
+            "physics.set_body",
+            json!({ "entity": id, "kind": "dynamic" }),
+        )?;
+        reg.call(
+            &mut engine,
+            "physics.set_collider",
+            json!({ "entity": id, "shape": { "cuboid": [0.5, 0.5, 0.5] } }),
+        )?;
+        let cube_before = *engine.world.get::<&Transform>(cube)?;
         engine.step(5);
         let before = SceneFile::capture(&engine.world, &engine.resources)?;
         let moon_before = *engine.world.get::<&Transform>(moon)?;
@@ -409,6 +430,11 @@ mod tests {
             moved.distance(moon_before.translation) > 0.1,
             "the moon moved"
         );
+        let fallen = engine.world.get::<&Transform>(cube)?.translation;
+        assert!(
+            fallen.y < cube_before.translation.y - 1.0,
+            "the cube fell: {fallen}"
+        );
 
         let stopped = call(&reg, &mut engine, "sim.stop")?;
         assert_eq!(stopped["stopped"], true);
@@ -420,6 +446,16 @@ mod tests {
             *engine.world.get::<&Transform>(moon)?,
             moon_before,
             "the moon is back under its old id, exactly"
+        );
+        assert_eq!(*engine.world.get::<&Transform>(cube)?, cube_before);
+        assert_eq!(
+            engine.world.get::<&RigidBody>(cube)?.kind,
+            crate::physics::BodyKind::Dynamic
+        );
+        assert!(engine.world.get::<&Collider>(cube).is_ok());
+        assert!(
+            engine.resources.expect::<PhysicsWorld>().is_empty(),
+            "the simulation is torn down"
         );
         let time = engine.resources.expect::<Time>();
         assert_eq!(time.fixed_steps, time_before.fixed_steps);

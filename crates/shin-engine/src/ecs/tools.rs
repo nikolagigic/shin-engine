@@ -22,6 +22,7 @@ use crate::asset::{AssetSource, with_assets};
 use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
+use crate::physics::{Collider, RigidBody};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::script::Script;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
@@ -43,8 +44,9 @@ pub fn register_tools(reg: &mut ToolRegistry) {
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
          (Euler degrees, XYZ), and scale (all local to the parent), world_translation, \
-         parent id if it has one, name and script path if it has them, and mesh, colour, \
-         and texture (a handle or null) if the entity draws one.",
+         parent id if it has one, name and script path if it has them, mesh, colour, \
+         and texture (a handle or null) if the entity draws one, and its physics `body` \
+         and `collider` if it has them.",
         entity_list,
     ));
     reg.register(
@@ -246,9 +248,11 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             Option<&MeshInstance>,
             Option<&Name>,
             Option<&Script>,
+            Option<&RigidBody>,
+            Option<&Collider>,
         )>()
         .iter()
-        .map(|(entity, transform, instance, name, script)| {
+        .map(|(entity, transform, instance, name, script, body, collider)| {
             let mut row = transform_json(transform);
             row["entity"] = json!(entity_id(entity));
             row["world_translation"] = json!(world_transform(world, entity).translation.to_array());
@@ -265,6 +269,12 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
                 row["mesh"] = json!(instance.mesh.0);
                 row["color"] = json!(instance.color);
                 row["texture"] = json!(instance.texture.map(|t| t.0));
+            }
+            if let Some(body) = body {
+                row["body"] = crate::physics::body_json(body);
+            }
+            if let Some(collider) = collider {
+                row["collider"] = crate::physics::collider_json(collider);
             }
             (entity_id(entity), row)
         })

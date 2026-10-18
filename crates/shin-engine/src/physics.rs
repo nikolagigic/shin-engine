@@ -56,6 +56,7 @@ use rapier3d::pipeline::PhysicsWorld as RapierWorld;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub(crate) use tools::{body_json, collider_json};
 pub use tools::register_tools;
 
 use crate::ecs::{Entity, Resources, Time, World, parent_of};
