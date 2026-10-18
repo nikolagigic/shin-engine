@@ -6,7 +6,10 @@
 //! local to the entity's parent (shown read-only by name), followed by the
 //! read-only world transform. GE-036: the entity's sound: source, a Play
 //! button that previews it, volume, and the loop, spatial, and autoplay
-//! flags.
+//! flags. GE-034: a Physics section edits the entity's rigid body
+//! (kind, mass) and collider (shape and size, friction, restitution);
+//! the viewport draws the selected entity's collider as a translucent
+//! shape.
 //!
 //! The panel keeps its own copy of the values being edited, refreshed from
 //! the world every frame except for the field the user is working on.
@@ -22,6 +25,7 @@ use shin::audio::AudioSource;
 use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::headless::Headless;
 use shin::math::{Camera, Projection, Transform, Vec3};
+use shin::physics::{BodyKind, Collider, ColliderShape, RigidBody};
 use shin::render::{MeshInstance, RenderState};
 use shin::scene::{AudioDesc, TransformDesc};
 use shin::script::{Script, ScriptEngine};
@@ -62,6 +66,10 @@ pub enum Edit {
     Script(Entity, String),
     /// `entity.set_audio` with the whole sound; `None` removes it (GE-036).
     Audio(Entity, Option<AudioDesc>),
+    /// `physics.set_body` (GE-034); `None` removes the body.
+    Body(Entity, Option<RigidBody>),
+    /// `physics.set_collider` (GE-034); `None` removes the collider.
+    Collider(Entity, Option<Collider>),
 }
 
 /// The Inspector's edit buffers.
@@ -79,6 +87,8 @@ pub struct Inspector {
     audio_source: String,
     /// The volume drag value.
     audio_volume: f32,
+    body: Option<RigidBody>,
+    collider: Option<Collider>,
     /// The transform before the preview in progress, if any.
     transform_origin: Option<TransformDesc>,
     /// The colour before the preview in progress, if any.
@@ -92,6 +102,8 @@ pub struct Inspector {
     audio_source_focused: bool,
     /// Whether the volume is being dragged or typed in.
     audio_volume_editing: bool,
+    /// Whether a physics number is being dragged or typed.
+    physics_focused: bool,
 }
 
 /// The values the inspector shows for `entity`, read from the world.
@@ -110,6 +122,8 @@ struct Current {
     script_error: Option<String>,
     /// The entity's sound, if any.
     audio: Option<AudioDesc>,
+    body: Option<RigidBody>,
+    collider: Option<Collider>,
 }
 
 impl Current {
@@ -152,6 +166,8 @@ impl Current {
                 .get::<&AudioSource>(entity)
                 .ok()
                 .map(|a| AudioDesc::from_source(&a)),
+            body: world.get::<&RigidBody>(entity).ok().map(|b| *b),
+            collider: world.get::<&Collider>(entity).ok().map(|c| *c),
         }
     }
 }
@@ -212,6 +228,28 @@ pub fn scene_camera_ui(ui: &mut Ui, engine: &Headless, actions: &mut Vec<Action>
         .clicked()
     {
         actions.push(Action::SetSceneCameraFromView);
+    }
+}
+
+/// The Inspector's name for a collider shape.
+fn shape_label(shape: &ColliderShape) -> &'static str {
+    match shape {
+        ColliderShape::Cuboid(_) => "cuboid",
+        ColliderShape::Ball(_) => "ball",
+        ColliderShape::Capsule { .. } => "capsule",
+    }
+}
+
+/// The shape the Inspector gives a new collider of kind `label`: sized to
+/// fit the unit cube.
+fn default_shape(label: &str) -> ColliderShape {
+    match label {
+        "ball" => ColliderShape::Ball(0.5),
+        "capsule" => ColliderShape::Capsule {
+            half_height: 0.25,
+            radius: 0.25,
+        },
+        _ => ColliderShape::Cuboid(Vec3::splat(0.5)),
     }
 }
 
@@ -308,6 +346,12 @@ impl Inspector {
         if let Some(error) = &current.script_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        ui.separator();
+        ui.strong("Physics");
+        egui::Grid::new("inspector_physics_grid")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| self.physics_rows(ui, entity, &current, actions));
 
         // A drag or colour pick ends when the pointer is released; a typed
         // number ends when its field loses focus.
@@ -346,6 +390,10 @@ impl Inspector {
         }
         if !self.audio_volume_editing {
             self.audio_volume = current.audio.as_ref().map_or(1.0, |a| a.volume);
+        }
+        if !self.physics_focused {
+            self.body = current.body;
+            self.collider = current.collider;
         }
     }
 
@@ -428,6 +476,128 @@ impl Inspector {
             }
         });
         ui.end_row();
+    }
+
+    /// The Physics rows (GE-034): body kind and, for a dynamic body, mass;
+    /// collider shape, its size, friction, and restitution. Choosing a kind
+    /// or shape commits at once; a number commits when its drag ends or
+    /// its field loses focus.
+    fn physics_rows(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        current: &Current,
+        actions: &mut Vec<Action>,
+    ) {
+        let mut focused = false;
+        let mut done = false;
+        // Sizes and masses must stay positive.
+        const SIZE: std::ops::RangeInclusive<f32> = 0.001..=1e4;
+        let mut number = |ui: &mut Ui, value: &mut f32, speed: f64, range| {
+            let response = ui.add(
+                DragValue::new(value)
+                    .speed(speed)
+                    .range(range)
+                    .max_decimals(3)
+                    .update_while_editing(false),
+            );
+            focused |= response.dragged() || response.has_focus();
+            done |= response.drag_stopped() || response.lost_focus();
+        };
+
+        ui.label("Body");
+        let kind = self.body.map(|b| b.kind);
+        let mut picked = kind;
+        egui::ComboBox::from_id_salt("inspector_body")
+            .selected_text(kind.map_or("(none)", BodyKind::label))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut picked, None, "(none)");
+                for kind in [BodyKind::Dynamic, BodyKind::Kinematic, BodyKind::Fixed] {
+                    ui.selectable_value(&mut picked, Some(kind), kind.label());
+                }
+            });
+        if picked != kind {
+            let mass = self.body.map_or(RigidBody::DEFAULT_MASS, |b| b.mass);
+            let body = picked.map(|kind| RigidBody { kind, mass });
+            actions.push(Action::Edit(Edit::Body(entity, body)));
+        }
+        ui.end_row();
+        if let Some(body) = &mut self.body
+            && body.kind == BodyKind::Dynamic
+        {
+            ui.label("Mass (kg)");
+            number(ui, &mut body.mass, 0.05, 0.001..=1e6);
+            ui.end_row();
+        }
+
+        ui.label("Collider");
+        let shape = self.collider.map(|c| shape_label(&c.shape));
+        let mut picked = shape;
+        egui::ComboBox::from_id_salt("inspector_collider")
+            .selected_text(shape.unwrap_or("(none)"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut picked, None, "(none)");
+                for label in ["cuboid", "ball", "capsule"] {
+                    ui.selectable_value(&mut picked, Some(label), label);
+                }
+            });
+        if picked != shape {
+            let collider = picked.map(|label| Collider {
+                shape: default_shape(label),
+                ..self.collider.unwrap_or(Collider::new(default_shape(label)))
+            });
+            actions.push(Action::Edit(Edit::Collider(entity, collider)));
+        }
+        ui.end_row();
+        if let Some(collider) = &mut self.collider {
+            match &mut collider.shape {
+                ColliderShape::Cuboid(half) => {
+                    ui.label("Half extents");
+                    ui.horizontal(|ui| {
+                        number(ui, &mut half.x, 0.01, SIZE);
+                        number(ui, &mut half.y, 0.01, SIZE);
+                        number(ui, &mut half.z, 0.01, SIZE);
+                    });
+                    ui.end_row();
+                }
+                ColliderShape::Ball(radius) => {
+                    ui.label("Radius");
+                    number(ui, radius, 0.01, SIZE);
+                    ui.end_row();
+                }
+                ColliderShape::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    ui.label("Half height");
+                    number(ui, half_height, 0.01, SIZE);
+                    ui.end_row();
+                    ui.label("Radius");
+                    number(ui, radius, 0.01, SIZE);
+                    ui.end_row();
+                }
+            }
+            ui.label("Friction");
+            number(ui, &mut collider.friction, 0.01, 0.0..=100.0);
+            ui.end_row();
+            ui.label("Restitution");
+            number(ui, &mut collider.restitution, 0.01, 0.0..=1.0);
+            ui.end_row();
+        }
+
+        self.physics_focused = focused;
+        if done && !focused {
+            if self.body != current.body
+                && let Some(body) = self.body
+            {
+                actions.push(Action::Edit(Edit::Body(entity, Some(body))));
+            }
+            if self.collider != current.collider
+                && let Some(collider) = self.collider
+            {
+                actions.push(Action::Edit(Edit::Collider(entity, Some(collider))));
+            }
+        }
     }
 
     /// The script path field: commits on Enter or when it loses focus, if

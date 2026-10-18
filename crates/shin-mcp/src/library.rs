@@ -36,7 +36,7 @@ macro_rules! page {
 }
 
 /// Every page of the user guide, `(page, Markdown)`, in book order.
-pub(crate) const GUIDE_PAGES: [(&str, &str); 13] = [
+pub(crate) const GUIDE_PAGES: [(&str, &str); 14] = [
     page!("SUMMARY"),
     page!("introduction"),
     page!("getting-started"),
@@ -45,6 +45,7 @@ pub(crate) const GUIDE_PAGES: [(&str, &str); 13] = [
     page!("scenes"),
     page!("scripting"),
     page!("audio"),
+    page!("physics"),
     page!("agents-mcp"),
     page!("agents-skills"),
     page!("reference/tools"),

@@ -23,6 +23,7 @@ use crate::audio::{AudioSource, audio_json};
 use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
+use crate::physics::{Collider, RigidBody};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::script::Script;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
@@ -45,8 +46,8 @@ pub fn register_tools(reg: &mut ToolRegistry) {
         "Lists entities that have a transform, in id order: id, translation, rotation \
          (Euler degrees, XYZ), and scale (all local to the parent), world_translation, \
          parent id if it has one, name, script path, and audio (source, volume, looping, \
-         spatial, autoplay) if it has them, and mesh, colour, and texture (a handle or null) \
-         if the entity draws one.",
+         spatial, autoplay) if it has them, mesh, colour, and texture (a handle or null) \
+         if the entity draws one, and its physics `body` and `collider` if it has them.",
         entity_list,
     ));
     reg.register(
@@ -249,31 +250,42 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             Option<&Name>,
             Option<&Script>,
             Option<&AudioSource>,
+            Option<&RigidBody>,
+            Option<&Collider>,
         )>()
         .iter()
-        .map(|(entity, transform, instance, name, script, audio)| {
-            let mut row = transform_json(transform);
-            row["entity"] = json!(entity_id(entity));
-            row["world_translation"] = json!(world_transform(world, entity).translation.to_array());
-            if let Some(parent) = parent_of(world, entity) {
-                row["parent"] = json!(entity_id(parent));
-            }
-            if let Some(Name(name)) = name {
-                row["name"] = json!(name);
-            }
-            if let Some(script) = script {
-                row["script"] = json!(script.path.to_string_lossy());
-            }
-            if let Some(audio) = audio {
-                row["audio"] = audio_json(audio);
-            }
-            if let Some(instance) = instance {
-                row["mesh"] = json!(instance.mesh.0);
-                row["color"] = json!(instance.color);
-                row["texture"] = json!(instance.texture.map(|t| t.0));
-            }
-            (entity_id(entity), row)
-        })
+        .map(
+            |(entity, transform, instance, name, script, audio, body, collider)| {
+                let mut row = transform_json(transform);
+                row["entity"] = json!(entity_id(entity));
+                row["world_translation"] =
+                    json!(world_transform(world, entity).translation.to_array());
+                if let Some(parent) = parent_of(world, entity) {
+                    row["parent"] = json!(entity_id(parent));
+                }
+                if let Some(Name(name)) = name {
+                    row["name"] = json!(name);
+                }
+                if let Some(script) = script {
+                    row["script"] = json!(script.path.to_string_lossy());
+                }
+                if let Some(audio) = audio {
+                    row["audio"] = audio_json(audio);
+                }
+                if let Some(instance) = instance {
+                    row["mesh"] = json!(instance.mesh.0);
+                    row["color"] = json!(instance.color);
+                    row["texture"] = json!(instance.texture.map(|t| t.0));
+                }
+                if let Some(body) = body {
+                    row["body"] = crate::physics::body_json(body);
+                }
+                if let Some(collider) = collider {
+                    row["collider"] = crate::physics::collider_json(collider);
+                }
+                (entity_id(entity), row)
+            },
+        )
         .collect();
     rows.sort_by_key(|(id, _)| *id);
     let rows: Vec<Value> = rows

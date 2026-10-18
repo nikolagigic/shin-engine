@@ -21,7 +21,7 @@ The goal is an MVP that proves one architecture, not a feature list:
 ## Documentation
 
 The user guide is at <https://nikolagigic.github.io/shin-engine/>: getting
-started, projects, the editor, scenes, scripting, agents and MCP, and a
+started, projects, the editor, scenes, scripting, physics, agents and MCP, and a
 tools reference generated from the engine's tool registry. Its source is
 the mdBook in [`guide/`](guide/); build it locally with `mdbook build
 guide`.

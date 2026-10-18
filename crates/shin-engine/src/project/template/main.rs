@@ -1,5 +1,6 @@
 //! A Shin starter game: a lit cube on a ground slab with a small moon
-//! orbiting it, viewed through the free-fly camera. The window title and
+//! orbiting it and a stack of crates that physics drops onto the ground,
+//! viewed through the free-fly camera. The window title and
 //! size come from `shin.toml`; the scene is `scenes/main.scene.ron`.
 //!
 //! ```text
@@ -28,6 +29,7 @@ use shin::gpu::GpuContext;
 use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
+use shin::physics::physics_system;
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
 use shin::scene;
@@ -79,13 +81,17 @@ fn orbit_system(world: &mut World, res: &mut Resources) {
     }
 }
 
-/// The game's own systems, plus the engine's script and audio systems (so
-/// scene scripts run and spatial sounds follow the camera). Add yours
-/// here; they run in the window and under `--mcp` alike.
+/// The game's own systems, plus the engine's script, physics, and audio
+/// systems (so scene scripts run, rigid bodies fall and collide, and
+/// spatial sounds follow the camera). Add yours here; they run in the
+/// window and under `--mcp` alike. Under `--mcp`, scripts and physics
+/// run once `sim.play` has started play mode. Keep `physics` after
+/// systems that move kinematic bodies.
 fn game_schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_fixed("orbit", orbit_system);
     schedule.add_fixed("script", script_system);
+    schedule.add_fixed("physics", physics_system);
     schedule.add_frame("audio", audio_system);
     schedule
 }

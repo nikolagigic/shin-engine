@@ -150,6 +150,29 @@ Values are refreshed from the world every frame except for the field you
 are typing in. Every commit is one entry in the History panel, so a drag
 of any length undoes in one step.
 
+### Physics
+
+Below the entity rows, a **Physics** section edits the entity's
+[rigid body and collider](physics.md):
+
+| Row              | Edit | Tool call recorded |
+|------------------|------|--------------------|
+| **Body**         | A drop-down: `(none)`, `dynamic`, `kinematic`, or `fixed`. Choosing commits at once, keeping the mass. | `physics.set_body` |
+| **Mass (kg)**    | A drag value, shown for dynamic bodies. | `physics.set_body` |
+| **Collider**     | A drop-down: `(none)`, `cuboid`, `ball`, or `capsule`. A new shape starts sized to fit the unit cube (half extents 0.5, radius 0.5, or a capsule of half height and radius 0.25). | `physics.set_collider` |
+| **Half extents**, **Radius**, **Half height** | The shape's size in the entity's own units (multiplied by its scale), as drag values. | `physics.set_collider` |
+| **Friction**, **Restitution** | Drag values; restitution is 0 to 1. | `physics.set_collider` |
+
+A drag value commits one edit when you release it or, when typed, when
+its field loses focus.
+
+While a selected top-level entity has a collider, the viewport draws the
+collider over the scene as a **translucent green shape** at the size the
+simulation uses: a box for a cuboid, a ball for a ball, and the
+ellipsoid filling a capsule's bounding box for a capsule. Compare it with
+the mesh to check that the collider fits. Colliders on child entities are
+not drawn, since physics ignores them.
+
 ### Scene camera
 
 Below the entity rows, whether or not something is selected, the
@@ -310,14 +333,17 @@ The toolbar at the end of the menu bar has **Play**, **Pause**,
 - **Play** snapshots the scene (in scene file form, with the entity ids
   and the simulation clock) and starts stepping the simulation at the
   engine's fixed step of 1/60 s, from wall-clock frame times. Entities'
-  Rhai scripts run every step. While playing, the Play button is shown
+  Rhai scripts run every step, then [physics](physics.md): bodies are
+  created from the entities' rigid bodies and colliders, and dynamic ones
+  fall and collide. While playing, the Play button is shown
   selected and the viewport renders from the scene camera, as the game
   would; Stop returns to the orbit camera's view.
 - **Pause** suspends stepping; click it again (or Play) to resume. No time
   builds up while paused.
 - **Stop** restores the scene exactly as it was at Play: every entity
   comes back under the id it had, so the selection and the history stay
-  valid, and the clock is restored.
+  valid, and the clock is restored. The physics simulation is torn down;
+  the next Play starts it again from the components.
 
 While playing, editing is disabled: the Inspector is read-only (it still
 shows the live values), the gizmo is hidden, the Scene panel's add and
@@ -330,12 +356,13 @@ and `sim.stop` from the Console, and an agent's calls are all the same
 play mode.
 
 Only what a scene file holds survives a play session: entities with a
-transform (their transform, mesh, colour, texture, name, and script), the
-camera, and the light. Playing is not an edit, so it does not mark the
+transform (their transform, mesh, colour, texture, name, script, parent,
+rigid body, and collider), the camera, and the light. Playing is not an edit, so it does not mark the
 scene unsaved.
 
 The editor does not run your project's compiled Rust systems; only the
-engine's own systems and the entities' scripts run under Play. To see
+engine's own systems (scripts and physics) run under Play. In a new
+project, Play drops the starter scene's stack of crates onto the ground. To see
 the starter scene's moon move in the editor, either attach the orbit
 script from [Scripting](scripting.md) to it, or start the editor with
 `--demo-orbit`, which registers a stand-in system that moves the entity

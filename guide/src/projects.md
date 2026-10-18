@@ -168,8 +168,10 @@ cargo run -- --mcp   serve this game to an agent over MCP (stdio)
 
 Both modes build the same world, systems, and resources: an `orbit`
 system that moves the entity named `moon` on a circle around the cube,
-the engine's script and audio systems (so the moon's script runs and its
-blip fades with distance), a camera with a 60° field of view (the scene file says where it is), and one
+the engine's script, physics, and audio systems (so the moon's script
+runs, the crates fall by [physics](physics.md), and the blip fades with
+distance), a camera with a 60° field of view (the scene file says where
+it is), and one
 project-defined tool, `game.hello`. Whatever an agent sees under `--mcp`
 is the game itself. [Agents and MCP](agents-mcp.md) covers that mode and
 how to add tools; the full file is below.
@@ -186,9 +188,12 @@ how to add tools; the full file is below.
 The starter scene, `scenes/main.scene.ron`, is a ground slab (the cube
 scaled to 20 × 0.5 × 20 so its top face is at y = 0), an orange cube
 resting on it and turned 30° about Y, and a small `moon` beside the cube
-at (1.6, 0.5, 0), where the orbit system puts it at time zero. The camera
-sits at (0, 2, 5) looking at (0, 0.5, 0), and a warm directional light
-comes from above and in front. All three entities draw
+at (1.6, 0.5, 0), where the orbit system puts it at time zero. To the
+left, five 0.4 m crates (`crate 1` to `crate 5`) hang a little apart above
+the ground; each has a dynamic rigid body and a box collider, and the
+ground has a fixed one, so they drop into a stack when the simulation
+runs. The camera sits at (0, 2, 5) looking at (0, 0.5, 0), and a warm
+directional light comes from above and in front. Every entity draws
 `assets/cube.gltf`. The moon also carries `assets/sounds/blip.wav` as a
 spatial audio source and runs `scripts/moon.rhai`, which plays the blip
 each time the moon completes a revolution; see [Audio](audio.md).

@@ -23,9 +23,10 @@ no rotation and unit scale; the blue cube gives only the parts of its
 transform that differ from that. Optional fields that are absent are
 simply left out, without `Some(...)`.
 
-Three optional entity fields do not appear above. `texture` gives a
-base-colour texture, `script` attaches a Rhai script, and `audio`
-attaches a sound, like this fragment of an entity:
+Five optional entity fields do not appear above. `texture` gives a
+base-colour texture, `script` attaches a Rhai script, `audio` attaches a
+sound, and `body` and `collider` make the entity take part in
+[physics](physics.md), like this fragment of an entity:
 
 ```ron
 (
@@ -36,6 +37,8 @@ attaches a sound, like this fragment of an entity:
     texture: "assets/checker.png",
     script: "scripts/orbit.rhai",
     audio: (source: "assets/sounds/blip.wav", spatial: true),
+    body: (kind: dynamic, mass: 2.0),
+    collider: (shape: cuboid((0.5, 0.5, 0.5)), friction: 0.5, restitution: 0.0),
 ),
 ```
 
@@ -88,6 +91,8 @@ Each entry of `entities`:
 | `texture`   | string     | no       | Base-colour texture, as a texture asset source; none for untextured. Ignored without `mesh`. |
 | `script`    | string     | no       | A `.rhai` file relative to the project directory, run every fixed step while playing; see [Scripting](scripting.md). |
 | `audio`     | audio      | no       | The entity's sound; see [`audio`](#audio) below and [Audio](audio.md). |
+| `body`      | body       | no       | The entity's rigid body; see [Body and collider](#body-and-collider). |
+| `collider`  | collider   | no       | The entity's collision shape; see [Body and collider](#body-and-collider). |
 | `children`  | list of entity | no   | Entities that belong to this one; see [Children](#children). Default empty, and left out when empty. |
 
 ### Children
@@ -115,6 +120,30 @@ unchanged; the format version stays 1.
 Translation, rotation, and scale compose separately. If a parent has a
 non-uniform scale and its child is rotated, the slant (shear) that a full
 matrix product would give is dropped.
+
+### Body and collider
+
+`body` and `collider` put the entity under [physics](physics.md). Both
+apply to top-level entities only; on a child they are saved but the
+simulation ignores them.
+
+`body`:
+
+| Field  | Type   | Default | Meaning |
+|--------|--------|---------|---------|
+| `kind` | `dynamic`, `kinematic`, or `fixed` | required | How the body moves. |
+| `mass` | number | `1.0`   | Mass in kilograms, positive. Used by dynamic bodies, and written for them only. |
+
+`collider`:
+
+| Field         | Type   | Default  | Meaning |
+|---------------|--------|----------|---------|
+| `shape`       | shape  | required | `cuboid((hx, hy, hz))` half extents, `ball(radius)`, or `capsule(half_height: h, radius: r)` along local +Y. In the entity's own units: multiplied by its scale. Every size must be positive. |
+| `friction`    | number | `0.5`    | 0 or more. |
+| `restitution` | number | `0.0`    | Bounciness, 0 to 1. |
+
+Saving writes every collider field and a dynamic body's mass, so a scene
+saved from the engine names its values explicitly.
 
 ### `transform`
 
@@ -163,7 +192,8 @@ once and shared by every entity that names it.
 
 Saving captures every entity that has a transform, in entity id order,
 with its transform, mesh source, colour, texture source, name, script,
-audio source, and children nested inside it; plus the camera and the light. A child
+audio source, rigid body, collider, and children nested inside it; plus
+the camera and the light. The physics gravity is not saved. A child
 whose parent has no transform is written at the top level. Nothing else survives a save and load:
 other components, and entities without a transform, are not in the file.
 That is also what [Play and Stop](editor.md#play-pause-stop) in the editor
@@ -190,7 +220,10 @@ as it was. These are errors, each naming what is wrong:
   below it, a field of view outside 1 to 179) or a zero light direction,
 - a mesh or texture source that does not parse or cannot be loaded (the
   error names the source and the entity index, counting nested children
-  depth first).
+  depth first),
+- an invalid body or collider: a mass, size, or friction that is not
+  positive (friction may be 0), or a restitution outside 0 to 1 (the error
+  names the entity index the same way).
 
 A successful load replaces every entity, then applies the camera and the
 light if the file has them.
@@ -204,8 +237,12 @@ light if the file has them.
 | `entity.set_parent` | Makes an entity the child of another, or a top-level entity again with `parent: null`. By default it keeps the entity's world position; `keep_world: false` keeps its local transform instead. Undoable. |
 | `entity.despawn` | Removes an entity and, by default, all its descendants. With `recursive: false` its children stay, as top-level entities in the same world position. Undoable. |
 
+`physics.set_body` and `physics.set_collider` set the `body` and
+`collider` fields; see [Physics](physics.md#tools).
+
 `entity.list` reports each entity's `parent` id and its
-`world_translation` alongside the local transform. `entity.spawn` takes an
+`world_translation` alongside the local transform, and its `body` and
+`collider`. `entity.spawn` takes an
 optional `parent`.
 
 With a project open, relative paths are resolved against the project

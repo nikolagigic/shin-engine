@@ -26,7 +26,8 @@
 //!
 //! A snapshot holds, per entity, the components the editing tools change:
 //! [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`],
-//! [`Children`], and [`AudioSource`]. Restoring one keeps every
+//! [`Children`], [`AudioSource`], [`RigidBody`], and [`Collider`].
+//! Restoring one keeps every
 //! entity's [`Entity`] id (via `World::spawn_at`), so ids handed out by
 //! `entity.spawn` stay valid across undo and redo. Other components on a
 //! restored entity are kept if it is alive and lost if it is respawned
@@ -63,7 +64,8 @@ pub use tools::register_tools;
 use crate::audio::AudioSource;
 use crate::ecs::{Children, Entity, Name, Parent, World};
 use crate::headless::Headless;
-use crate::math::{Camera, Transform};
+use crate::math::{Camera, Transform, Vec3};
+use crate::physics::{Collider, PhysicsWorld, RigidBody};
 use crate::render::{LightUniform, MeshInstance, RenderState};
 use crate::script::Script;
 use crate::tool::{ToolError, ToolOutput, ToolRegistry};
@@ -106,6 +108,8 @@ pub enum Affected {
     Camera,
     /// The [`RenderState`] light.
     Light,
+    /// The [`PhysicsWorld`] gravity.
+    Gravity,
     /// Every entity, the camera, and the light (for example `scene.load`).
     Scene,
 }
@@ -120,6 +124,8 @@ struct EntityState {
     audio: Option<AudioSource>,
     parent: Option<Parent>,
     children: Option<Children>,
+    body: Option<RigidBody>,
+    collider: Option<Collider>,
 }
 
 impl EntityState {
@@ -133,6 +139,8 @@ impl EntityState {
             audio: world.get::<&AudioSource>(entity).ok().map(|a| (*a).clone()),
             parent: world.get::<&Parent>(entity).ok().map(|p| *p),
             children: world.get::<&Children>(entity).ok().map(|c| (*c).clone()),
+            body: world.get::<&RigidBody>(entity).ok().map(|b| *b),
+            collider: world.get::<&Collider>(entity).ok().map(|c| *c),
         }
     }
 }
@@ -156,19 +164,27 @@ struct EntitiesSnapshot {
 
 /// The state a tool call touched, captured before or after it: the
 /// affected entities (keyed by [`Entity`] id, each with its
-/// [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`], and
-/// [`Children`]), plus the camera or the light when the tool changes them.
+/// [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`AudioSource`],
+/// [`Parent`], [`Children`], [`RigidBody`], and [`Collider`]), plus the
+/// camera, the
+/// light, or the gravity when the tool changes them.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     entities: Option<EntitiesSnapshot>,
     camera: Option<Camera>,
     light: Option<LightUniform>,
+    gravity: Option<Vec3>,
 }
 
 impl Snapshot {
     /// The current state of `entities` (`None`: not captured), and of the
-    /// camera and light when asked for.
-    fn capture(engine: &Headless, entities: Option<Scope>, camera: bool, light: bool) -> Self {
+    /// camera, light, and gravity when asked for.
+    fn capture(engine: &Headless, entities: Option<Scope>, parts: Parts) -> Self {
+        let Parts {
+            camera,
+            light,
+            gravity,
+        } = parts;
         let world = &engine.world;
         let entities = entities.map(|scope| {
             let alive = match &scope {
@@ -193,12 +209,18 @@ impl Snapshot {
             light: light
                 .then(|| engine.resources.get::<RenderState>().map(|s| s.light))
                 .flatten(),
+            gravity: gravity.then(|| {
+                engine
+                    .resources
+                    .get::<PhysicsWorld>()
+                    .map_or(crate::physics::DEFAULT_GRAVITY, PhysicsWorld::gravity)
+            }),
         }
     }
 
     /// Makes `engine` match this snapshot: despawns in-scope entities that
     /// are not in it, overwrites or respawns (with the same id) those that
-    /// are, and sets the camera and light if they were captured.
+    /// are, and sets the camera, light, and gravity if they were captured.
     fn restore(&self, engine: &mut Headless) -> anyhow::Result<()> {
         if let Some(snapshot) = &self.entities {
             let world = &mut engine.world;
@@ -226,8 +248,25 @@ impl Snapshot {
                 .context("no RenderState resource")?
                 .light = light;
         }
+        if let Some(gravity) = self.gravity {
+            if engine.resources.get::<PhysicsWorld>().is_none() {
+                engine.resources.insert(PhysicsWorld::default());
+            }
+            engine
+                .resources
+                .expect_mut::<PhysicsWorld>()
+                .set_gravity(gravity);
+        }
         Ok(())
     }
+}
+
+/// Which resources besides entities a [`Snapshot`] captures.
+#[derive(Clone, Copy, Debug, Default)]
+struct Parts {
+    camera: bool,
+    light: bool,
+    gravity: bool,
 }
 
 /// Gives `entity` exactly the components in `state`, spawning it with that
@@ -242,6 +281,8 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
         let _ = world.remove_one::<AudioSource>(entity);
         let _ = world.remove_one::<Parent>(entity);
         let _ = world.remove_one::<Children>(entity);
+        let _ = world.remove_one::<RigidBody>(entity);
+        let _ = world.remove_one::<Collider>(entity);
     } else {
         world.spawn_at(entity, ());
     }
@@ -265,6 +306,12 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
     }
     if let Some(audio) = &state.audio {
         world.insert_one(entity, audio.clone())?;
+    }
+    if let Some(body) = state.body {
+        world.insert_one(entity, body)?;
+    }
+    if let Some(collider) = state.collider {
+        world.insert_one(entity, collider)?;
     }
     Ok(())
 }
@@ -322,16 +369,43 @@ impl History {
         if affected != Affected::None {
             ensure_not_playing(engine)?;
         }
-        let (entities, camera, light) = match &affected {
+        let none = Parts::default();
+        let (entities, parts) = match &affected {
             Affected::None => return reg.call(engine, tool, args),
             Affected::Entities(ids) | Affected::SpawnedWith(ids) => {
-                (Some(Scope::Only(ids.clone())), false, false)
+                (Some(Scope::Only(ids.clone())), none)
             }
-            Affected::Spawned => (Some(Scope::Only(Vec::new())), false, false),
-            Affected::AllEntities => (Some(Scope::All), false, false),
-            Affected::Camera => (None, true, false),
-            Affected::Light => (None, false, true),
-            Affected::Scene => (Some(Scope::All), true, true),
+            Affected::Spawned => (Some(Scope::Only(Vec::new())), none),
+            Affected::AllEntities => (Some(Scope::All), none),
+            Affected::Camera => (
+                None,
+                Parts {
+                    camera: true,
+                    ..none
+                },
+            ),
+            Affected::Light => (
+                None,
+                Parts {
+                    light: true,
+                    ..none
+                },
+            ),
+            Affected::Gravity => (
+                None,
+                Parts {
+                    gravity: true,
+                    ..none
+                },
+            ),
+            Affected::Scene => (
+                Some(Scope::All),
+                Parts {
+                    camera: true,
+                    light: true,
+                    ..none
+                },
+            ),
         };
         let spawning = matches!(affected, Affected::Spawned | Affected::SpawnedWith(_));
         let existing: HashSet<Entity> = if spawning {
@@ -339,7 +413,7 @@ impl History {
         } else {
             HashSet::new()
         };
-        let mut before = Snapshot::capture(engine, entities.clone(), camera, light);
+        let mut before = Snapshot::capture(engine, entities.clone(), parts);
 
         let output = reg.call(engine, tool, args.clone())?;
 
@@ -366,7 +440,7 @@ impl History {
         } else {
             entities
         };
-        let after = Snapshot::capture(engine, entities, camera, light);
+        let after = Snapshot::capture(engine, entities, parts);
         self.push(Entry {
             tool: tool.to_string(),
             args,

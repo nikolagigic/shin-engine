@@ -302,8 +302,8 @@ impl ToolRegistry {
     /// `shin-mcp` serves. History (`history.undo`, `history.redo`) is
     /// included too, and play mode (`sim.play`, `sim.pause`, `sim.stop`),
     /// scripts (`script.attach`, `script.eval`, `script.errors`), input
-    /// actions (`input.list`, `input.set`), and audio (`audio.play`,
-    /// `audio.stop_all`, `entity.set_audio`).
+    /// actions (`input.list`, `input.set`), audio (`audio.play`,
+    /// `audio.stop_all`, `entity.set_audio`), and physics (`physics.*`).
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
         crate::asset::register_tools(&mut registry);
@@ -317,6 +317,7 @@ impl ToolRegistry {
         crate::script::register_tools(&mut registry);
         crate::input::register_tools(&mut registry);
         crate::audio::register_tools(&mut registry);
+        crate::physics::register_tools(&mut registry);
         registry
     }
 

@@ -20,7 +20,8 @@
 //! with the fly camera and an orbit system of its own, or with `--mcp`
 //! serves the same world, systems, and a `game.hello` tool over MCP; GE-027),
 //! `scenes/main.scene.ron` (a lit cube on a ground slab with a small moon
-//! orbiting it, the project's entry scene), `scripts/player.rhai` (moves
+//! orbiting it and a stack of five crates that physics drops onto the
+//! ground, GE-034; the project's entry scene), `scripts/player.rhai` (moves
 //! the cube with those actions), `assets/cube.gltf` + `assets/cube.bin`,
 //! `assets/sounds/blip.wav` + `scripts/moon.rhai` (the moon blips once per
 //! revolution; GE-036), `.mcp.json` (runs the game with `--mcp`),
@@ -40,7 +41,10 @@ use serde_json::json;
 
 use crate::headless::Headless;
 use crate::input::InputConfig;
-use crate::scene::{AudioDesc, CameraDesc, EntityDesc, LightDesc, SceneFile, TransformDesc};
+use crate::physics::{BodyKind, ShapeDesc};
+use crate::scene::{
+    AudioDesc, BodyDesc, CameraDesc, ColliderDesc, EntityDesc, LightDesc, SceneFile, TransformDesc,
+};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 pub mod skills;
@@ -369,12 +373,19 @@ fn starter_input() -> InputConfig {
     .expect("the starter input config is valid")
 }
 
+/// The number of crates in the starter scene's stack.
+pub const STARTER_CRATES: usize = 5;
+
 /// The starter scene, drawn with the project's `assets/cube.gltf`: a
-/// ground slab, a cube on it driven by [`STARTER_SCRIPT`], and a small
-/// `moon` beside the cube. The template's orbit system moves the moon; it
-/// starts where that system puts it at time zero, `(1.6, 0.5, 0)`. The
-/// moon carries the starter sound as a spatial [`AudioDesc`] and the
-/// script [`MOON_SCRIPT`], which plays it once per revolution (GE-036).
+/// ground slab, a cube on it driven by [`STARTER_SCRIPT`], a small `moon`
+/// beside the cube, and a stack of [`STARTER_CRATES`] crates (GE-034).
+/// The template's orbit system moves the moon; it starts where that
+/// system puts it at time zero, `(1.6, 0.5, 0)`. The moon carries the
+/// starter sound as a spatial [`AudioDesc`] and the script
+/// [`MOON_SCRIPT`], which plays it once per revolution (GE-036). The
+/// crates are dynamic bodies hanging a little apart above the ground, a
+/// fixed body, so Play drops them into a stack; they stand clear of the
+/// moon's orbit.
 fn starter_scene() -> SceneFile {
     let cube = |name: &str, transform: TransformDesc, color: [f32; 4]| EntityDesc {
         name: Some(name.to_string()),
@@ -384,6 +395,45 @@ fn starter_scene() -> SceneFile {
         script: (name == "cube").then(|| STARTER_SCRIPT.to_string()),
         ..Default::default()
     };
+    // The unit cube's collider; entity scale sizes it.
+    let unit_box = Some(ColliderDesc {
+        shape: ShapeDesc::Cuboid([0.5; 3]),
+        friction: None,
+        restitution: None,
+    });
+    let mut ground = cube(
+        "ground",
+        TransformDesc {
+            translation: [0.0, -0.25, 0.0],
+            scale: [20.0, 0.5, 20.0],
+            ..Default::default()
+        },
+        [0.18, 0.2, 0.17, 1.0],
+    );
+    ground.body = Some(BodyDesc {
+        kind: BodyKind::Fixed,
+        mass: None,
+    });
+    ground.collider = unit_box;
+    // 0.4 m crates, 0.1 m apart, the lowest 0.4 m above the ground; each
+    // turned a little more than the one below.
+    let crates = (0..STARTER_CRATES).map(|i| {
+        let mut entity = cube(
+            &format!("crate {}", i + 1),
+            TransformDesc {
+                translation: [-2.4, 0.6 + 0.5 * i as f32, -0.5],
+                rotation_euler_deg: [0.0, 12.0 * i as f32, 0.0],
+                scale: [0.4; 3],
+            },
+            [0.55, 0.38, 0.2, 1.0],
+        );
+        entity.body = Some(BodyDesc {
+            kind: BodyKind::Dynamic,
+            mass: Some(1.0),
+        });
+        entity.collider = unit_box;
+        entity
+    });
     SceneFile {
         camera: Some(CameraDesc {
             position: [0.0, 2.0, 5.0],
@@ -395,17 +445,9 @@ fn starter_scene() -> SceneFile {
             color: [1.0, 0.95, 0.85],
             ambient: [0.12, 0.13, 0.16],
         }),
-        entities: vec![
+        entities: [
             // Ground: the cube flattened into a slab whose top face is y = 0.
-            cube(
-                "ground",
-                TransformDesc {
-                    translation: [0.0, -0.25, 0.0],
-                    scale: [20.0, 0.5, 20.0],
-                    ..Default::default()
-                },
-                [0.18, 0.2, 0.17, 1.0],
-            ),
+            ground,
             // The cube, turned a little so the light catches three faces;
             // the player script moves it.
             cube(
@@ -436,7 +478,10 @@ fn starter_scene() -> SceneFile {
                     [0.75, 0.78, 0.85, 1.0],
                 )
             },
-        ],
+        ]
+        .into_iter()
+        .chain(crates)
+        .collect(),
         ..Default::default()
     }
 }
@@ -520,7 +565,9 @@ A game made with [Shin]({ENGINE_GIT_URL}).
 cargo run
 ```
 
-A lit cube on a ground slab with a small moon orbiting it. The window
+A lit cube on a ground slab with a small moon orbiting it, and a stack
+of five crates that falls onto the ground (each crate has a dynamic
+rigid body and a box collider; the ground a fixed one). The window
 title and size come from `shin.toml`, the scene from
 `scenes/main.scene.ron`, and the orbit from `orbit_system` in
 `src/main.rs`. The cube is yours: `scripts/player.rhai` slides it with
@@ -947,7 +994,11 @@ mod tests {
             json!({ "title": "tool-game", "width": 1280, "height": 720 })
         );
         assert_eq!((engine.target.width, engine.target.height), (1280, 720));
-        assert_eq!(engine.world.len(), 3, "the entry scene's entities");
+        assert_eq!(
+            engine.world.len() as usize,
+            3 + STARTER_CRATES,
+            "the entry scene's entities"
+        );
         let ToolOutput::Json(info) = reg.call(&mut engine, "project.info", json!({}))? else {
             panic!("expected JSON");
         };
@@ -965,7 +1016,7 @@ mod tests {
             "scene.load",
             json!({ "path": "scenes/copy.scene.ron" }),
         )?;
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
 
         // Escaping the root is an error naming the path, for both tools.
         for tool in ["scene.save", "scene.load"] {
@@ -990,7 +1041,7 @@ mod tests {
             engine.resources.get::<ProjectRoot>(),
             Some(&ProjectRoot(root))
         );
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
 
         fs::remove_dir_all(&dir)?;
         Ok(())
@@ -1030,7 +1081,7 @@ mod tests {
         project.save(&dir)?;
         let mut engine = Headless::open_project(&dir)?;
         assert_eq!((engine.target.width, engine.target.height), (64, 32));
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
         assert_eq!(engine.render()?.dimensions(), (64, 32));
         fs::remove_dir_all(&dir)?;
         Ok(())

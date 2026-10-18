@@ -6,6 +6,8 @@
 //! and the ids of the captured entities, and stores it in the [`PlayState`]
 //! resource. While playing, [`Headless::step`] (or `sim.step`, or the
 //! editor's own fixed-timestep loop) runs the fixed systems as usual.
+//! Physics bodies are created from the components by the first step of
+//! play and torn down by [`Headless::stop`] ([`PhysicsWorld::clear`]).
 //! [`Headless::stop`] loads the snapshot back with [`scene::apply`],
 //! respawns each entity under the id it had before play (so ids handed out
 //! by `entity.spawn`, the editor's selection, and the command history stay
@@ -13,7 +15,7 @@
 //!
 //! Only what a scene file holds survives a play session: entities with a
 //! [`Transform`] (their transform, mesh, colour, texture, name, script,
-//! parent, and audio source), the
+//! parent, audio source, rigid body, and collider), the
 //! camera, and the light. Other components and entities without a
 //! transform are gone after [`Headless::stop`].
 //!
@@ -33,6 +35,7 @@ use super::Headless;
 use crate::audio::{self, AudioSource};
 use crate::ecs::{Children, Entity, Name, Parent, Time};
 use crate::math::Transform;
+use crate::physics::{Collider, PhysicsWorld, RigidBody};
 use crate::render::MeshInstance;
 use crate::scene::{self, SceneFile};
 use crate::script::Script;
@@ -157,10 +160,10 @@ impl Headless {
         }
     }
 
-    /// Stops playing: stops every sound, restores the scene, entity ids,
-    /// and [`Time`] captured by [`Self::play`], and sets
-    /// [`PlayState::Edit`]. Returns `false` (and changes nothing) if
-    /// nothing was playing.
+    /// Stops playing: stops every sound, tears down the physics
+    /// simulation, restores the scene, entity ids, and [`Time`] captured
+    /// by [`Self::play`], and sets [`PlayState::Edit`]. Returns `false`
+    /// (and changes nothing) if nothing was playing.
     ///
     /// Fails, still playing, if the snapshot cannot be loaded back.
     pub fn stop(&mut self) -> anyhow::Result<bool> {
@@ -178,6 +181,9 @@ impl Headless {
         )
         .context("cannot stop: the play snapshot did not load")?;
         restore_ids(&mut self.world, &spawned, &snapshot.ids)?;
+        if let Some(physics) = self.resources.get_mut::<PhysicsWorld>() {
+            physics.clear();
+        }
         self.resources.insert(snapshot.time);
         self.resources.insert(PlayState::Edit);
         log::info!("stop");
@@ -210,6 +216,8 @@ fn restore_ids(
         Option<Parent>,
         Option<Children>,
         Option<AudioSource>,
+        Option<RigidBody>,
+        Option<Collider>,
     );
     let rows: Vec<Row> = spawned
         .iter()
@@ -231,11 +239,14 @@ fn restore_ids(
                     .ok()
                     .map(|c| Children(c.0.iter().map(|&child| remap(child)).collect())),
                 world.get::<&AudioSource>(entity).ok().map(|a| (*a).clone()),
+                world.get::<&RigidBody>(entity).ok().map(|b| *b),
+                world.get::<&Collider>(entity).ok().map(|c| *c),
             )
         })
         .collect();
     world.clear();
-    for (&id, (transform, instance, name, script, parent, children, audio)) in ids.iter().zip(rows)
+    for (&id, (transform, instance, name, script, parent, children, audio, body, collider)) in
+        ids.iter().zip(rows)
     {
         let mut builder = hecs::EntityBuilder::new();
         builder.add(transform);
@@ -256,6 +267,12 @@ fn restore_ids(
         }
         if let Some(audio) = audio {
             builder.add(audio);
+        }
+        if let Some(body) = body {
+            builder.add(body);
+        }
+        if let Some(collider) = collider {
+            builder.add(collider);
         }
         world.spawn_at(id, builder.build());
     }
@@ -281,10 +298,10 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "sim.stop",
         "Leaves play mode: stops every sound and restores the scene (every entity with its \
-         id, transform, mesh, colour, texture, name, script, and audio; the camera; the \
-         light) and the simulation time to what they were at sim.play. Returns `stopped` \
-         (false if nothing was playing), `state`, and `entities`, the number of entities \
-         restored.",
+         id, transform, mesh, colour, texture, name, script, parent, audio, rigid body, and \
+         collider; the camera; the light) and the simulation time to what they were at \
+         sim.play. Returns `stopped` (false if nothing was playing), `state`, and \
+         `entities`, the number of entities restored.",
         sim_stop,
     ));
 }
@@ -380,10 +397,31 @@ mod tests {
 
     /// The ticket's registry test: play, step (elapsed and the moon move),
     /// stop: transforms equal the pre-play scene file, ids are kept.
+    /// GE-034: the cube is a dynamic body, which falls while playing and is
+    /// back in place, with its body, after stop.
     #[test]
     fn sim_play_step_stop_restores_the_scene() -> anyhow::Result<()> {
         let reg = ToolRegistry::with_engine_tools();
         let (mut engine, moon) = orbit_engine(&reg)?;
+        let cube = engine
+            .world
+            .query::<(Entity, &Name)>()
+            .iter()
+            .find(|(_, n)| n.0 == "cube")
+            .map(|(e, _)| e)
+            .context("no cube")?;
+        let id = cube.to_bits().get();
+        reg.call(
+            &mut engine,
+            "physics.set_body",
+            json!({ "entity": id, "kind": "dynamic" }),
+        )?;
+        reg.call(
+            &mut engine,
+            "physics.set_collider",
+            json!({ "entity": id, "shape": { "cuboid": [0.5, 0.5, 0.5] } }),
+        )?;
+        let cube_before = *engine.world.get::<&Transform>(cube)?;
         engine.step(5);
         let before = SceneFile::capture(&engine.world, &engine.resources)?;
         let moon_before = *engine.world.get::<&Transform>(moon)?;
@@ -405,6 +443,11 @@ mod tests {
             moved.distance(moon_before.translation) > 0.1,
             "the moon moved"
         );
+        let fallen = engine.world.get::<&Transform>(cube)?.translation;
+        assert!(
+            fallen.y < cube_before.translation.y - 1.0,
+            "the cube fell: {fallen}"
+        );
 
         let stopped = call(&reg, &mut engine, "sim.stop")?;
         assert_eq!(stopped["stopped"], true);
@@ -416,6 +459,16 @@ mod tests {
             *engine.world.get::<&Transform>(moon)?,
             moon_before,
             "the moon is back under its old id, exactly"
+        );
+        assert_eq!(*engine.world.get::<&Transform>(cube)?, cube_before);
+        assert_eq!(
+            engine.world.get::<&RigidBody>(cube)?.kind,
+            crate::physics::BodyKind::Dynamic
+        );
+        assert!(engine.world.get::<&Collider>(cube).is_ok());
+        assert!(
+            engine.resources.expect::<PhysicsWorld>().is_empty(),
+            "the simulation is torn down"
         );
         let time = engine.resources.expect::<Time>();
         assert_eq!(time.fixed_steps, time_before.fixed_steps);

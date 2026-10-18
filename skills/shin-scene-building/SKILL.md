@@ -71,6 +71,14 @@ rendered frame, and save it to a scene file.
    together, `entity.set_parent` with `{"entity": <child>, "parent": <id>}`;
    the child stays where it is in the world by default.
 
+   To make something fall and collide, give it a body and a collider:
+   `physics.set_body` with `{"entity": <id>, "kind": "dynamic"}` (or
+   `"fixed"` for the floor) and `physics.set_collider` with
+   `{"entity": <id>, "shape": {"cuboid": [0.5, 0.5, 0.5]}}`. Collider
+   sizes are in the entity's own units and scale with it, so that cuboid
+   fits the unit cube at any scale. Physics only runs between `sim.play`
+   and `sim.stop`; `physics.raycast` finds what lies along a ray.
+
 4. **Frame it.** `camera.set` with
    `{"position": [0, 3, 6], "look_at": [0, 0.5, 0], "fov_y_deg": 60}`.
    Place the camera a few units back from the scene's centre and above it.

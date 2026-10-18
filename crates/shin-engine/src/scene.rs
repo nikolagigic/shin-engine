@@ -15,6 +15,8 @@
 //!             texture: "assets/checker.png",
 //!             script: "scripts/orbit.rhai",
 //!             audio: (source: "assets/sounds/blip.wav", spatial: true),
+//!             body: (kind: dynamic, mass: 2.0),
+//!             collider: (shape: cuboid((0.5, 0.5, 0.5)), friction: 0.5, restitution: 0.0),
 //!             children: [
 //!                 (
 //!                     name: "hat",
@@ -29,16 +31,24 @@
 //!
 //! [`save`] writes and [`load`] reads that format. Optional fields
 //! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, `script`,
-//! `audio`, `children`, and every transform part) may be left out, and are
-//! written without `Some(...)`. Unknown fields are an error naming the
-//! field. Meshes, textures (GE-025), and sounds (GE-036) are
-//! [`AssetSource`] strings, so a scene file is independent of runtime
+//! `audio`, `body`, `collider`, `children`, and every transform part) may
+//! be left out, and are written without `Some(...)`. Unknown fields are an
+//! error naming the field. Meshes, textures (GE-025), and sounds (GE-036)
+//! are [`AssetSource`] strings, so a scene file is independent of runtime
 //! handles.
 //!
 //! Hierarchy (GE-031): an entity's `children` are nested inside it, and a
 //! child's `transform` is local to its parent, as in the world. Roots are
 //! written in entity id order and each child list in id order; loading
 //! spawns depth first in that order.
+//!
+//! Physics (GE-034): `body` is the entity's [`RigidBody`]: `kind` is
+//! `dynamic`, `kinematic`, or `fixed`, and `mass` (in kg, dynamic only)
+//! defaults to one. `collider` is its [`Collider`]: `shape` is
+//! `cuboid((hx, hy, hz))` half extents, `ball(radius)`, or
+//! `capsule(half_height: h, radius: r)`, in the entity's own units;
+//! `friction` defaults to 0.5 and `restitution` to 0. See
+//! [`crate::physics`].
 //!
 //! Angles (`rotation_euler_deg`, `fov_y_deg`) and `look_at` are derived from
 //! the engine's quaternions and radians, so [`save`] rounds them to four
@@ -61,6 +71,7 @@ use crate::asset::{AssetSource, Assets};
 use crate::audio::AudioSource;
 use crate::ecs::{Entity, Name, Resources, World, child_map, parent_of, set_parent};
 use crate::math::{Camera, Projection, Quat, Transform, Vec3};
+use crate::physics::{BodyKind, Collider, ColliderShape, RigidBody, ShapeDesc};
 use crate::render::{LightUniform, MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::script::Script;
 
@@ -158,6 +169,82 @@ pub struct EntityDesc {
     /// to it. Default empty, and left out of the file when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<EntityDesc>,
+    /// The entity's [`RigidBody`] (GE-034); none for an entity physics
+    /// does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyDesc>,
+    /// The entity's [`Collider`] (GE-034); none for an entity that does not
+    /// collide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider: Option<ColliderDesc>,
+}
+
+/// A [`RigidBody`] in a scene file.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BodyDesc {
+    /// How the body moves.
+    pub kind: BodyKind,
+    /// Mass in kilograms for a dynamic body; default 1. Written for dynamic
+    /// bodies only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass: Option<f32>,
+}
+
+impl BodyDesc {
+    /// `body` as written in a scene file.
+    pub fn from_body(body: &RigidBody) -> Self {
+        Self {
+            kind: body.kind,
+            mass: (body.kind == BodyKind::Dynamic).then_some(body.mass),
+        }
+    }
+
+    /// The component this describes, validated.
+    pub fn to_body(&self) -> anyhow::Result<RigidBody> {
+        let body = RigidBody {
+            kind: self.kind,
+            mass: self.mass.unwrap_or(RigidBody::DEFAULT_MASS),
+        };
+        body.validate()?;
+        Ok(body)
+    }
+}
+
+/// A [`Collider`] in a scene file.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColliderDesc {
+    /// The shape, in the entity's own units.
+    pub shape: ShapeDesc,
+    /// Friction, 0 or more; default 0.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction: Option<f32>,
+    /// Restitution (bounciness), 0 to 1; default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution: Option<f32>,
+}
+
+impl ColliderDesc {
+    /// `collider` as written in a scene file (every field written).
+    pub fn from_collider(collider: &Collider) -> Self {
+        Self {
+            shape: ShapeDesc::from(collider.shape),
+            friction: Some(collider.friction),
+            restitution: Some(collider.restitution),
+        }
+    }
+
+    /// The component this describes, validated.
+    pub fn to_collider(&self) -> anyhow::Result<Collider> {
+        let collider = Collider {
+            shape: ColliderShape::from(self.shape),
+            friction: self.friction.unwrap_or(Collider::DEFAULT_FRICTION),
+            restitution: self.restitution.unwrap_or(Collider::DEFAULT_RESTITUTION),
+        };
+        collider.validate()?;
+        Ok(collider)
+    }
 }
 
 /// An [`AudioSource`] in file form. Every field but `source` has a default
@@ -330,7 +417,7 @@ impl SceneFile {
     pub fn capture_with_ids(world: &World, res: &Resources) -> anyhow::Result<(Self, Vec<Entity>)> {
         let state = res.get::<RenderState>();
         let mut rows: HashMap<Entity, EntityDesc> = HashMap::new();
-        for (entity, transform, instance, name, script, audio) in world
+        for (entity, transform, instance, name, script, audio, body, collider) in world
             .query::<(
                 Entity,
                 &Transform,
@@ -338,6 +425,8 @@ impl SceneFile {
                 Option<&Name>,
                 Option<&Script>,
                 Option<&AudioSource>,
+                Option<&RigidBody>,
+                Option<&Collider>,
             )>()
             .iter()
         {
@@ -382,6 +471,8 @@ impl SceneFile {
                 texture,
                 script: script.map(|s| s.path.to_string_lossy().into_owned()),
                 audio: audio.map(AudioDesc::from_source),
+                body: body.map(BodyDesc::from_body),
+                collider: collider.map(ColliderDesc::from_collider),
                 children: Vec::new(),
             };
             rows.insert(entity, desc);
@@ -495,8 +586,9 @@ pub fn save(world: &World, res: &Resources, path: &Path) -> anyhow::Result<()> {
 /// decoded into the same cache. Everything is parsed, validated, and
 /// resolved before the world is cleared, so a failed load leaves the world
 /// untouched. Fails on a parse error, an unknown field (named), an
-/// unsupported version, an invalid camera or light, or a mesh, texture, or
-/// sound source that does not resolve (the error names the source).
+/// unsupported version, an invalid camera or light, a mesh, texture, or
+/// sound source that does not resolve (the error names the source), or an
+/// invalid body or collider (the error names the entity's index).
 pub fn load(
     world: &mut World,
     res: &mut Resources,
@@ -544,12 +636,19 @@ pub fn apply_entities(
         );
     }
     let flat = flatten(&scene.entities);
+    let physics = flat
+        .iter()
+        .enumerate()
+        .map(|(i, (desc, _))| physics_components(desc).with_context(|| format!("entity {i}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved = resolve_assets(res, device, queue, &flat)?;
     let sounds = resolve_sounds(res, &flat)?;
 
     world.clear();
     let mut spawned: Vec<Entity> = Vec::with_capacity(flat.len());
-    for (((desc, parent), assets), audio) in flat.iter().zip(resolved).zip(sounds) {
+    for ((((desc, parent), assets), audio), (body, collider)) in
+        flat.iter().zip(resolved).zip(sounds).zip(physics)
+    {
         let entity = world.spawn((desc.transform.to_transform(),));
         if let Some(audio) = audio {
             world.insert_one(entity, audio)?;
@@ -568,6 +667,12 @@ pub fn apply_entities(
         }
         if let Some(path) = &desc.script {
             world.insert_one(entity, Script::new(path))?;
+        }
+        if let Some(body) = body {
+            world.insert_one(entity, body)?;
+        }
+        if let Some(collider) = collider {
+            world.insert_one(entity, collider)?;
         }
         if let Some(parent) = parent {
             // The file's transform is already local to the parent.
@@ -590,6 +695,17 @@ pub fn apply_entities(
         };
     }
     Ok(spawned)
+}
+
+/// `desc`'s [`RigidBody`] and [`Collider`], validated.
+fn physics_components(desc: &EntityDesc) -> anyhow::Result<(Option<RigidBody>, Option<Collider>)> {
+    let body = desc.body.as_ref().map(BodyDesc::to_body).transpose()?;
+    let collider = desc
+        .collider
+        .as_ref()
+        .map(ColliderDesc::to_collider)
+        .transpose()?;
+    Ok((body, collider))
 }
 
 /// What an entity draws: its mesh and optional texture.

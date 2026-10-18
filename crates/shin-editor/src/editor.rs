@@ -14,6 +14,8 @@
 //! Clicking in the viewport selects, and the gizmo's handle drags arrive
 //! as the same preview and edit actions an Inspector drag produces
 //! (GE-035).
+//! The selected entity's collider (GE-034) is drawn over the scene as a
+//! translucent box or ball ([`collider_overlay`]).
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
@@ -28,12 +30,13 @@ use serde_json::{Value, json};
 use shin::app::{AppConfig, Game};
 use shin::asset::AssetSource;
 use shin::command::{self, History};
-use shin::ecs::{Entity, Name};
+use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
 use shin::math::{Camera, Transform};
+use shin::physics::{Collider, ColliderShape};
 use shin::project::{Project, ProjectRoot};
-use shin::render::{MeshInstance, begin_mesh_pass};
+use shin::render::{MeshHandle, MeshInstance, OverlayDraw, begin_mesh_pass, render_overlay};
 use shin::tool::{ToolOutput, ToolRegistry};
 use winit::window::Window;
 
@@ -96,7 +99,22 @@ pub struct EditorCore {
     saved: Vec<(String, Value)>,
     /// Steps the simulation from frame times while playing (GE-024).
     clock: PlayClock,
+    /// The built-in cube and sphere the collider overlay draws, loaded the
+    /// first time a selected entity has a collider.
+    overlay_meshes: Option<OverlayMeshes>,
 }
+
+/// The meshes [`collider_overlay`] draws colliders with.
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayMeshes {
+    /// `builtin://cube`: extent -0.5..0.5.
+    pub cube: MeshHandle,
+    /// `builtin://sphere`: radius 1.
+    pub sphere: MeshHandle,
+}
+
+/// Linear RGBA of the collider overlay: a translucent green.
+const COLLIDER_TINT: [f32; 4] = [0.2, 0.9, 0.35, 0.35];
 
 /// How much the selected entity's colour is mixed toward white in the
 /// viewport (render only; the component keeps its colour).
@@ -139,6 +157,7 @@ impl EditorCore {
             assets_docked: false,
             fields: Fields::default(),
             saved: Vec::new(),
+            overlay_meshes: None,
         })
     }
 
@@ -197,6 +216,7 @@ impl EditorCore {
             self.run(action);
         }
         self.clock.tick(&mut self.engine);
+        let overlay = self.selected_collider_overlay();
 
         let renderer = self.renderer.get_or_insert_with(|| {
             egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default())
@@ -212,7 +232,7 @@ impl EditorCore {
             // Editing: the viewport shows the orbit camera. Playing: the
             // scene's own camera, as the game would (GE-030).
             let view = (!self.engine.play_state().is_playing()).then(|| self.orbit.transform());
-            render_scene(&mut self.engine, self.selection.0, view);
+            render_scene(&mut self.engine, self.selection.0, view, overlay);
         }
 
         let screen = egui_wgpu::ScreenDescriptor {
@@ -260,6 +280,39 @@ impl EditorCore {
             renderer.free_texture(&id);
         }
         full.platform_output
+    }
+
+    /// The selected entity's collider as an overlay draw, loading the
+    /// overlay meshes the first time one is needed. `None` without a
+    /// selected root entity that has a collider, or if the meshes do not
+    /// load (logged).
+    fn selected_collider_overlay(&mut self) -> Option<OverlayDraw> {
+        let entity = self.selection.0?;
+        self.engine.world.get::<&Collider>(entity).ok()?;
+        if self.overlay_meshes.is_none() {
+            let mut load = |source: &str| -> anyhow::Result<MeshHandle> {
+                let output = self.registry.call(
+                    &mut self.engine,
+                    "asset.load",
+                    json!({ "source": source }),
+                )?;
+                let ToolOutput::Json(value) = output else {
+                    anyhow::bail!("asset.load returned no JSON");
+                };
+                let handle = value["handle"].as_u64().context("no mesh handle")?;
+                Ok(MeshHandle(handle as u32))
+            };
+            match (load("builtin://cube"), load("builtin://sphere")) {
+                (Ok(cube), Ok(sphere)) => {
+                    self.overlay_meshes = Some(OverlayMeshes { cube, sphere })
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    log::error!("cannot draw colliders: {err:#}");
+                    return None;
+                }
+            }
+        }
+        collider_overlay(&self.engine, entity, self.overlay_meshes?)
     }
 
     /// Clears the selection if its entity no longer exists (deleted, or
@@ -378,6 +431,12 @@ impl EditorCore {
             Action::PreviewSound(source) => edit::preview_sound(reg, engine, &source)?,
             Action::Edit(Edit::Texture(entity, source)) => {
                 edit::commit_texture(reg, engine, entity, source.as_deref())?;
+            }
+            Action::Edit(Edit::Body(entity, body)) => {
+                edit::commit_body(reg, engine, entity, body)?;
+            }
+            Action::Edit(Edit::Collider(entity, collider)) => {
+                edit::commit_collider(reg, engine, entity, collider)?;
             }
             Action::Edit(Edit::Script(entity, path)) => {
                 // A compile error is logged by the engine and shown in the
@@ -544,12 +603,46 @@ fn sync_viewport_texture(
     });
 }
 
+/// How the viewport draws `entity`'s collider (GE-034): the built-in cube
+/// for a cuboid and the sphere for a ball or capsule (a capsule as the
+/// ellipsoid filling its bounding box), at the entity's world position and
+/// rotation and the collider's size as the simulation sees it (scaled by
+/// the entity's scale), tinted translucent green. `None` if the entity has
+/// no collider or is a child (physics ignores colliders on children).
+pub fn collider_overlay(
+    engine: &Headless,
+    entity: Entity,
+    meshes: OverlayMeshes,
+) -> Option<OverlayDraw> {
+    let world = &engine.world;
+    let collider = *world.get::<&Collider>(entity).ok()?;
+    if parent_of(world, entity).is_some() {
+        return None;
+    }
+    let placed = world_transform(world, entity);
+    let size = collider.shape.scaled(placed.scale).extents();
+    let (mesh, scale) = match collider.shape {
+        ColliderShape::Cuboid(_) => (meshes.cube, size),
+        ColliderShape::Ball(_) | ColliderShape::Capsule { .. } => (meshes.sphere, size / 2.0),
+    };
+    Some(OverlayDraw {
+        mesh,
+        transform: Transform::from_trs(placed.translation, placed.rotation, scale),
+        color: COLLIDER_TINT,
+    })
+}
+
 /// Renders `engine`'s scene into its target with `selected` tinted toward
 /// white and, with `view`, from that placement instead of the scene
-/// camera's. The tint and the camera are put back right after the render,
-/// so the component, the `Camera` resource, the history, and saved scenes
-/// never see them.
-fn render_scene(engine: &mut Headless, selected: Option<Entity>, view: Option<Transform>) {
+/// camera's, then draws `overlay` (the selected collider) over it. The tint
+/// and the camera are put back right after the render, so the component,
+/// the `Camera` resource, the history, and saved scenes never see them.
+fn render_scene(
+    engine: &mut Headless,
+    selected: Option<Entity>,
+    view: Option<Transform>,
+    overlay: Option<OverlayDraw>,
+) {
     let tinted = selected.and_then(|entity| {
         let instance = engine
             .world
@@ -564,6 +657,17 @@ fn render_scene(engine: &mut Headless, selected: Option<Entity>, view: Option<Tr
         std::mem::replace(&mut camera.transform, view)
     });
     engine.render_to_target();
+    if let Some(draw) = overlay {
+        let aspect = engine.target.width as f32 / engine.target.height as f32;
+        render_overlay(
+            &mut engine.resources,
+            &engine.gpu,
+            &engine.target.color_view,
+            &engine.target.depth_view,
+            aspect,
+            &[draw],
+        );
+    }
     if let Some(transform) = authored {
         engine.resources.expect_mut::<Camera>().transform = transform;
     }
@@ -1891,6 +1995,80 @@ mod tests {
         Ok(())
     }
 
+    /// The starter scene's crates, `crate 1` (bottom) to `crate 5`, with
+    /// their transforms.
+    fn crates(core: &EditorCore) -> Vec<(Entity, Transform)> {
+        (1..=shin::project::STARTER_CRATES)
+            .map(|i| {
+                let entity = named(core, &format!("crate {i}"));
+                (
+                    entity,
+                    *core.engine.world.get::<&Transform>(entity).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// GE-034's acceptance test, through the editor's actions: in a fresh
+    /// project, Play drops the crates onto the ground into a stack, and Stop
+    /// puts every crate back exactly where it was.
+    #[test]
+    fn play_drops_the_crate_stack_and_stop_restores_it() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("physics-play")?;
+        let before = crates(&core);
+        let scene_before =
+            shin::scene::SceneFile::capture(&core.engine.world, &core.engine.resources)?;
+
+        core.try_run(Action::Play)?;
+        // Two seconds of frames.
+        for _ in 0..8 {
+            core.clock.advance(&mut core.engine, 0.25);
+        }
+        frame(&mut core, &gpu, &target, Vec::new());
+        for (i, ((_, start), (_, now))) in before.iter().zip(crates(&core)).enumerate() {
+            // 0.4 m crates, stacked on the ground (top face y = 0).
+            let rest = 0.2 + 0.4 * i as f32;
+            assert!(
+                now.translation.y < start.translation.y - 0.3,
+                "crate {} fell from {} to {}",
+                i + 1,
+                start.translation,
+                now.translation
+            );
+            assert!(
+                (now.translation.y - rest).abs() < 0.03,
+                "crate {} rests at y = {rest}: {}",
+                i + 1,
+                now.translation
+            );
+        }
+        let physics = core
+            .engine
+            .resources
+            .expect::<shin::physics::PhysicsWorld>();
+        assert_eq!(
+            physics.len(),
+            shin::project::STARTER_CRATES + 1,
+            "+ the ground"
+        );
+
+        core.try_run(Action::Stop)?;
+        assert_eq!(crates(&core), before, "every crate is back, exactly");
+        assert_eq!(
+            shin::scene::SceneFile::capture(&core.engine.world, &core.engine.resources)?,
+            scene_before
+        );
+        assert!(
+            core.engine
+                .resources
+                .expect::<shin::physics::PhysicsWorld>()
+                .is_empty()
+        );
+        assert!(!core.is_dirty(), "playing is not an edit");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
     /// Where `point` (world space) appears on screen in the viewport, as
     /// the last frame laid it out and the viewport camera sees it.
     fn on_screen(core: &EditorCore, point: Vec3) -> egui::Pos2 {
@@ -1982,6 +2160,70 @@ mod tests {
         );
         assert_ne!(core.orbit, orbit, "the drag orbited");
         assert_eq!(core.selection.0, None, "a drag is not a click");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-034: the Inspector's physics edits are single undoable tool
+    /// calls, and the selected entity's collider is drawn over the
+    /// viewport at its simulated size.
+    #[test]
+    fn inspector_physics_edits_undo_and_draw_the_collider() -> anyhow::Result<()> {
+        use shin::physics::{BodyKind, RigidBody};
+
+        let (mut core, gpu, target, root, _) = editor("physics-inspector")?;
+        let moon = named(&core, "moon");
+        let body = RigidBody {
+            kind: BodyKind::Dynamic,
+            mass: 2.0,
+        };
+        let ball = Collider::new(ColliderShape::Ball(0.5));
+        core.try_run(Action::Edit(Edit::Body(moon, Some(body))))?;
+        core.try_run(Action::Edit(Edit::Collider(moon, Some(ball))))?;
+        assert_eq!(*core.engine.world.get::<&RigidBody>(moon)?, body);
+        assert_eq!(*core.engine.world.get::<&Collider>(moon)?, ball);
+        let undo: Vec<String> = core.undo_stack().into_iter().map(|(t, _)| t).collect();
+        assert_eq!(undo, ["physics.set_body", "physics.set_collider"]);
+        assert!(core.is_dirty());
+        core.try_run(Action::Undo)?;
+        core.try_run(Action::Undo)?;
+        assert!(core.engine.world.get::<&RigidBody>(moon).is_err());
+        assert!(core.engine.world.get::<&Collider>(moon).is_err());
+        core.try_run(Action::Redo)?;
+        assert_eq!(*core.engine.world.get::<&RigidBody>(moon)?, body);
+
+        // The ground's overlay is the cube at the slab's size; the moon's
+        // (once it has its ball again) the sphere scaled to the ball's
+        // simulated radius (0.5 x the moon's 0.3 scale).
+        core.try_run(Action::Redo)?;
+        core.selection.0 = Some(moon);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let meshes = core.overlay_meshes.expect("loaded for the selection");
+        let ground = named(&core, "ground");
+        let draw = collider_overlay(&core.engine, ground, meshes).expect("ground collider");
+        assert_eq!(draw.mesh, meshes.cube);
+        assert_eq!(draw.transform.scale, Vec3::new(20.0, 0.5, 20.0));
+        assert_eq!(draw.color[3], COLLIDER_TINT[3]);
+        let draw = collider_overlay(&core.engine, moon, meshes).expect("moon collider");
+        assert_eq!(draw.mesh, meshes.sphere);
+        assert!((draw.transform.scale - Vec3::splat(0.15)).length() < 1e-6);
+        assert!(collider_overlay(&core.engine, named(&core, "cube"), meshes).is_none());
+
+        // Selecting the ground tints the whole slab in the viewport.
+        core.selection.0 = Some(ground);
+        let with_overlay = viewport(&mut core, &gpu, &target)?;
+        core.try_run(Action::Edit(Edit::Collider(ground, None)))?;
+        let without = viewport(&mut core, &gpu, &target)?;
+        let changed = differing(&with_overlay, &without);
+        assert!(
+            changed > 10_000,
+            "the overlay covers the ground: {changed} px"
+        );
+        core.try_run(Action::Undo)?;
+        assert_eq!(
+            differing(&viewport(&mut core, &gpu, &target)?, &with_overlay),
+            0
+        );
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

@@ -30,6 +30,7 @@ toml = { workspace = true }
 ron = { workspace = true }
 rhai = { workspace = true }
 kira = { workspace = true }
+rapier3d = { workspace = true }
 gilrs = { workspace = true }
 
 [dev-dependencies]
