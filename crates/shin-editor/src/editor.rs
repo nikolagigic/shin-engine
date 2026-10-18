@@ -8,6 +8,9 @@
 //! Play and Stop (GE-024) use the engine's play mode
 //! ([`shin::headless::PlayState`]); while playing, a [`PlayClock`] steps the
 //! simulation every frame and edits are refused.
+//! The scene's own [`Camera`] resource is left as authored (GE-030): the
+//! editor's [`OrbitCamera`] is swapped in only around the viewport render
+//! while editing, and Play renders from the scene camera as the game would.
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
@@ -25,7 +28,7 @@ use shin::command::{self, History};
 use shin::ecs::{Entity, Name};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
-use shin::math::Camera;
+use shin::math::{Camera, Transform};
 use shin::project::Project;
 use shin::render::{MeshInstance, begin_mesh_pass};
 use shin::tool::{ToolOutput, ToolRegistry};
@@ -176,9 +179,10 @@ impl EditorCore {
             renderer,
         );
         if self.viewport_texture.is_some() {
-            self.orbit
-                .apply(self.engine.resources.expect_mut::<Camera>());
-            render_scene(&mut self.engine, self.selection.0);
+            // Editing: the viewport shows the orbit camera. Playing: the
+            // scene's own camera, as the game would (GE-030).
+            let view = (!self.engine.play_state().is_playing()).then(|| self.orbit.transform());
+            render_scene(&mut self.engine, self.selection.0, view);
         }
 
         let screen = egui_wgpu::ScreenDescriptor {
@@ -334,6 +338,17 @@ impl EditorCore {
             Action::Open => self.open()?,
             Action::Save => self.save_as(self.scene_path.clone())?,
             Action::SaveAs(path) => self.save_as(path)?,
+            Action::ViewFromSceneCamera => {
+                let camera = engine
+                    .resources
+                    .get::<Camera>()
+                    .context("no Camera resource")?;
+                self.orbit.look_from(&camera.transform);
+            }
+            Action::SetSceneCameraFromView => {
+                let view = self.orbit.transform();
+                edit::commit_camera(reg, engine, view.translation, self.orbit.target)?;
+            }
         }
         Ok(())
     }
@@ -474,9 +489,11 @@ fn sync_viewport_texture(
 }
 
 /// Renders `engine`'s scene into its target with `selected` tinted toward
-/// white. The tint is put back right after the render, so the component,
-/// the history, and saved scenes never see it.
-fn render_scene(engine: &mut Headless, selected: Option<Entity>) {
+/// white and, with `view`, from that placement instead of the scene
+/// camera's. The tint and the camera are put back right after the render,
+/// so the component, the `Camera` resource, the history, and saved scenes
+/// never see them.
+fn render_scene(engine: &mut Headless, selected: Option<Entity>, view: Option<Transform>) {
     let tinted = selected.and_then(|entity| {
         let instance = engine
             .world
@@ -486,7 +503,14 @@ fn render_scene(engine: &mut Headless, selected: Option<Entity>) {
         instance.color = highlight(original);
         Some((entity, original))
     });
+    let authored = view.map(|view| {
+        let camera = engine.resources.expect_mut::<Camera>();
+        std::mem::replace(&mut camera.transform, view)
+    });
     engine.render_to_target();
+    if let Some(transform) = authored {
+        engine.resources.expect_mut::<Camera>().transform = transform;
+    }
     if let Some((entity, original)) = tinted {
         edit::preview_color(engine, entity, original);
     }
@@ -683,7 +707,7 @@ pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shin::math::Transform;
+    use shin::math::{Projection, Vec2, Vec3};
     use shin::project::{self, NewProjectOptions};
     use shin::scene::TransformDesc;
 
@@ -1241,6 +1265,218 @@ mod tests {
 
         core.try_run(Action::Edit(Edit::Script(cube, String::new())))?;
         assert!(entities(&mut core)?[1].get("script").is_none(), "cleared");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// An editor on a fresh demo project after one frame, with the GPU,
+    /// a window-sized target, the temp root, and the scene file's path.
+    fn editor(
+        label: &str,
+    ) -> anyhow::Result<(
+        EditorCore,
+        GpuContext,
+        OffscreenTarget,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> {
+        let (root, project_dir) = demo_project(label)?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let scene_file = project_dir.join("scenes/main.scene.ron");
+        Ok((core, gpu, target, root, scene_file))
+    }
+
+    /// The scene camera's placement.
+    fn scene_camera(core: &EditorCore) -> Transform {
+        core.engine.resources.expect::<Camera>().transform
+    }
+
+    /// The camera a scene file holds.
+    fn file_camera(path: &Path) -> anyhow::Result<shin::scene::CameraDesc> {
+        shin::scene::SceneFile::from_ron(&std::fs::read_to_string(path)?)?
+            .camera
+            .context("the scene file has no camera")
+    }
+
+    /// The middle of the Viewport panel after two frames.
+    fn viewport(
+        core: &mut EditorCore,
+        gpu: &GpuContext,
+        target: &OffscreenTarget,
+    ) -> anyhow::Result<image::RgbaImage> {
+        for _ in 0..2 {
+            frame(core, gpu, target, Vec::new());
+        }
+        let image = target.read_pixels(gpu)?;
+        Ok(image::imageops::crop_imm(&image, 400, 135, 800, 450).to_image())
+    }
+
+    /// How many pixels differ between two same-sized images.
+    fn differing(a: &image::RgbaImage, b: &image::RgbaImage) -> usize {
+        a.pixels().zip(b.pixels()).filter(|(a, b)| a != b).count()
+    }
+
+    /// GE-030: frames with the orbit camera never touch the scene camera,
+    /// so Save after orbiting writes the camera that was authored.
+    #[test]
+    fn orbit_and_save_keep_the_scene_camera() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, scene_file) = editor("scene-camera-save")?;
+        let authored = scene_camera(&core);
+        assert_eq!(
+            authored.translation,
+            Vec3::new(0.0, 2.0, 5.0),
+            "the starter scene's camera is the scene camera"
+        );
+        core.try_run(Action::Save)?;
+        let before = std::fs::read_to_string(&scene_file)?;
+
+        core.orbit.orbit(Vec2::new(300.0, -80.0));
+        core.orbit.pan(Vec2::new(40.0, 20.0));
+        core.orbit.zoom(400.0);
+        for _ in 0..3 {
+            frame(&mut core, &gpu, &target, Vec::new());
+        }
+        assert_eq!(scene_camera(&core), authored, "frames leave it alone");
+        assert!(
+            core.orbit
+                .transform()
+                .translation
+                .distance(authored.translation)
+                > 1.0,
+            "the view is somewhere else"
+        );
+        assert!(!core.is_dirty(), "orbiting is not an edit");
+
+        core.try_run(Action::Save)?;
+        let after = std::fs::read_to_string(&scene_file)?;
+        assert_eq!(after, before, "the saved file is identical");
+        assert_eq!(
+            file_camera(&scene_file)?.position,
+            authored.translation.to_array()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-030: "Set scene camera from view" records one `camera.set` that
+    /// moves the scene camera to the orbit camera, keeping the field of
+    /// view; it dirties the scene, Save writes it, and Ctrl+Z puts the
+    /// authored camera back exactly.
+    #[test]
+    fn set_scene_camera_from_view_is_undoable() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, scene_file) = editor("scene-camera-set")?;
+        core.try_run(Action::Save)?;
+        let original_file = std::fs::read_to_string(&scene_file)?;
+        let authored = *core.engine.resources.expect::<Camera>();
+        let Projection::Perspective { fov_y_radians, .. } = authored.projection else {
+            panic!("the starter camera is perspective");
+        };
+
+        core.orbit.orbit(Vec2::new(250.0, 60.0));
+        core.orbit.zoom(-300.0);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let view = core.orbit.transform();
+        core.try_run(Action::SetSceneCameraFromView)?;
+        let camera = *core.engine.resources.expect::<Camera>();
+        assert!(
+            camera.transform.translation.distance(view.translation) < 1e-4,
+            "{camera:?}"
+        );
+        assert!(
+            camera.transform.forward().distance(view.forward()) < 1e-4,
+            "{camera:?}"
+        );
+        assert!(
+            matches!(camera.projection, Projection::Perspective { fov_y_radians: f, .. } if f == fov_y_radians),
+            "the field of view is kept: {:?}",
+            camera.projection
+        );
+        assert!(core.is_dirty() && core.title().contains('*'));
+        let stack = core.undo_stack();
+        assert_eq!(stack.len(), 1, "{stack:?}");
+        assert_eq!(stack[0].0, "camera.set", "{stack:?}");
+
+        core.try_run(Action::Save)?;
+        assert_ne!(std::fs::read_to_string(&scene_file)?, original_file);
+        let saved = file_camera(&scene_file)?;
+        assert!(
+            Vec3::from(saved.position).distance(view.translation) < 1e-4,
+            "{saved:?}"
+        );
+        // A scene file's look_at is the view ray's point nearest the origin,
+        // so check the direction, not the point.
+        let saved_forward = (Vec3::from(saved.look_at) - Vec3::from(saved.position)).normalize();
+        assert!(
+            saved_forward.distance(view.forward()) < 1e-3,
+            "look_at is on the view ray: {saved:?}"
+        );
+
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert_eq!(
+            scene_camera(&core),
+            authored.transform,
+            "Ctrl+Z puts the authored camera back"
+        );
+        assert!(core.is_dirty(), "undone past the save");
+        core.try_run(Action::Save)?;
+        assert_eq!(std::fs::read_to_string(&scene_file)?, original_file);
+        frame(&mut core, &gpu, &target, vec![undo_key(true)]);
+        assert!(
+            scene_camera(&core).translation.distance(view.translation) < 1e-4,
+            "Ctrl+Shift+Z redoes it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-030: the viewport renders from the orbit camera while editing and
+    /// from the scene camera while playing; Stop returns to the orbit view,
+    /// and "View from scene camera" moves the orbit camera to match.
+    #[test]
+    fn play_renders_from_the_scene_camera() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("scene-camera-play")?;
+        core.orbit.orbit(Vec2::new(400.0, -100.0));
+        core.orbit.zoom(500.0);
+        let orbit_view = viewport(&mut core, &gpu, &target)?;
+        let total = orbit_view.pixels().count();
+
+        core.try_run(Action::Play)?;
+        let playing_view = viewport(&mut core, &gpu, &target)?;
+        let changed = differing(&orbit_view, &playing_view);
+        assert!(
+            changed > total / 10,
+            "playing shows the scene camera ({changed} of {total} pixels differ)"
+        );
+
+        core.try_run(Action::Stop)?;
+        let stopped_view = viewport(&mut core, &gpu, &target)?;
+        assert_eq!(
+            differing(&orbit_view, &stopped_view),
+            0,
+            "Stop returns to the orbit view"
+        );
+
+        core.try_run(Action::ViewFromSceneCamera)?;
+        let authored = scene_camera(&core);
+        let view = core.orbit.transform();
+        assert!(view.translation.distance(authored.translation) < 1e-4);
+        assert!(view.forward().distance(authored.forward()) < 1e-4);
+        assert!(!core.is_dirty(), "viewing is not an edit");
+        let from_scene = viewport(&mut core, &gpu, &target)?;
+        let changed = differing(&playing_view, &from_scene);
+        assert!(
+            changed < total / 100,
+            "the orbit camera now shows the scene camera's view ({changed} pixels differ)"
+        );
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
