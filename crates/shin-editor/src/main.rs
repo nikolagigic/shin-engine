@@ -1,17 +1,19 @@
 //! `shin-editor`, the Shin editor: an egui shell around a live viewport.
 //!
 //! ```text
-//! shin-editor <project-dir> [--screenshot <png>] [--demo-orbit]
+//! shin-editor <project-dir> [--screenshot <png> [--select <name>]] [--demo-orbit]
 //! ```
 //!
 //! Opens the project in `<project-dir>` (its `shin.toml` names the window)
 //! with docked Viewport, Scene, Assets, Inspector, History, Log, and
-//! Console panels. In the viewport, left-drag orbits, right-drag pans, and
-//! the wheel zooms. The toolbar's Play runs the simulation and Stop puts
-//! the scene back.
+//! Console panels. In the viewport, left-drag orbits, right-drag pans, the
+//! wheel zooms, a click selects the entity under the pointer, and the
+//! selection's gizmo moves, rotates, or scales it (W / E / R). The
+//! toolbar's Play runs the simulation and Stop puts the scene back.
 //!
 //! `--screenshot <png>` renders one full editor frame without a window,
-//! writes it to `<png>`, and exits; tests use it.
+//! writes it to `<png>`, and exits; tests use it. `--select <name>` selects
+//! the entity with that name first, so the frame shows its gizmo.
 //!
 //! `--demo-orbit` registers a demo system that moves the entity named
 //! `moon` around the origin while playing, as the starter game does, since
@@ -20,9 +22,11 @@
 mod assets;
 mod edit;
 mod editor;
+mod gizmo;
 mod inspector;
 mod log_sink;
 mod orbit;
+mod pick;
 mod play;
 mod scene;
 mod ui;
@@ -42,6 +46,10 @@ struct Cli {
     /// Render one editor frame offscreen to this PNG and exit.
     #[arg(long, value_name = "PNG")]
     screenshot: Option<PathBuf>,
+    /// With `--screenshot`: select the entity with this name first, so the
+    /// image shows its highlight and gizmo.
+    #[arg(long, value_name = "NAME", requires = "screenshot")]
+    select: Option<String>,
     /// Register a demo system that orbits the entity named `moon` while
     /// playing.
     #[arg(long)]
@@ -54,7 +62,7 @@ fn main() -> anyhow::Result<()> {
     log_sink::init(log.clone())?;
 
     match cli.screenshot {
-        Some(out) => editor::screenshot(&cli.project_dir, &out, log),
+        Some(out) => editor::screenshot(&cli.project_dir, &out, cli.select.as_deref(), log),
         None => editor::run(&cli.project_dir, log, cli.demo_orbit),
     }
 }

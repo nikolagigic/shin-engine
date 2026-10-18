@@ -8,7 +8,7 @@ same call.
 
 ```text
 shin edit <dir> [-- <editor args>...]
-shin-editor <project-dir> [--screenshot <png>] [--demo-orbit]
+shin-editor <project-dir> [--screenshot <png> [--select <name>]] [--demo-orbit]
 ```
 
 `shin edit` runs the `shin-editor` binary on a project directory (the one
@@ -24,7 +24,7 @@ The window opens at 1600 × 900 with seven docked panels:
 
 | Panel         | Where      | Shows |
 |---------------|------------|-------|
-| **Viewport**  | centre     | The scene, rendered live from the editor's orbit camera (from the scene's own camera while playing). The selected entity is drawn with its colour mixed halfway toward white. |
+| **Viewport**  | centre     | The scene, rendered live from the editor's orbit camera (from the scene's own camera while playing). Click an entity to select it. The selected entity is drawn with its colour mixed halfway toward white and carries a [gizmo](#moving-rotating-and-scaling-with-the-gizmo). |
 | **Scene**     | left, top  | Every entity that has a transform, as a tree: children under their parent, each level in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
 | **Assets**    | left, bottom | The project's meshes, textures, scenes, and scripts, with a button per entry to use it, and an Import row. |
 | **Inspector** | right, top | The selected entity's properties, editable, and the scene camera. |
@@ -50,7 +50,9 @@ cube resting on y = 0.
   0.1 and 500 units from the target.
 
 Drags only count when they start on the viewport, so dragging a panel's
-widgets never moves the camera.
+widgets never moves the camera. A left-drag that starts on a
+[gizmo](#moving-rotating-and-scaling-with-the-gizmo) handle edits the
+selection instead of orbiting.
 
 The orbit camera is the editor's own. The scene's camera, the one the
 scene file holds and the game starts from, is left exactly as authored
@@ -61,10 +63,54 @@ viewport, use the Inspector's [Scene camera](#scene-camera) buttons.
 
 ## Selecting
 
-Click an entity in the Scene panel to select it. One entity is selected
-at a time. Escape clears the selection. New entities are selected as they
+Click an entity in the viewport or in the Scene panel to select it.
+Clicking empty space in the viewport (the sky, or past the edge of
+everything) clears the selection, as does Escape. One entity is selected
+at a time; shift-click and box selection are not supported.
+
+A viewport click picks the nearest entity under the pointer that draws a
+mesh. Each one is tested as a box: its mesh's bounding box, turned,
+scaled, and placed by the entity's world transform (so children are
+picked where they appear). The box can be a little larger than the
+shape it holds, so a click just beside a sphere's outline can still pick
+it. A click is a press and release without moving; a drag orbits and
+leaves the selection alone. Picking works while playing too, through the
+scene camera. New entities are selected as they
 are added, and an entity that is deleted (or that disappears when play
 stops) is deselected.
+
+## Moving, rotating, and scaling with the gizmo
+
+![The cube selected in the viewport with its move gizmo: red, green, and blue arrows and plane handles at its centre](images/editor-gizmo.png)
+
+While editing, the selected entity shows a gizmo at its origin. Drag a
+handle to change the entity's transform:
+
+| Mode       | Key | Handles | Axes |
+|------------|-----|---------|------|
+| **Move**   | W   | An arrow per axis (X red, Y green, Z blue), a square per plane, and a circle in the middle that moves in the view plane. | World |
+| **Rotate** | E   | A ring per axis, and an outer ring that turns about the view direction. | World |
+| **Scale**  | R   | A handle per axis, a square per plane, and the middle for uniform scale. | The entity's own |
+
+Pick the mode with the **Move**, **Rotate**, and **Scale** buttons at the
+end of the toolbar, or with W, E, and R while the pointer is over the
+viewport and no text field has focus.
+
+**Hold Ctrl** (Cmd on macOS) while dragging to snap: moves go in steps of
+0.5 units, rotations in steps of 15°, and scaling in steps of 0.1, each
+counted from where the drag started.
+
+The gizmo works in world space and the editor converts the result into
+the entity's own transform, local to its parent, so a child of a turned
+or scaled parent still moves along the world axis you drag. Scaling uses
+the entity's own axes, because a world-axis scale of a turned entity
+cannot be stored in a transform.
+
+A drag previews the change live and records one `entity.set_transform`
+when you release the button, exactly as an Inspector drag does: the
+History panel shows one entry, and Ctrl+Z puts the entity back where the
+drag started. A press on a handle never orbits the camera and a release
+on one never changes the selection. The gizmo is hidden while playing.
 
 ## The scene tree
 
@@ -203,8 +249,8 @@ Agents see the same list through the `asset.list` tool.
   name and JSON arguments of each recorded call, then what redo would
   bring back, greyed out. It is read-only.
 
-Only recorded tool calls appear: edits from the Inspector, the Scene
-panel, the Assets panel, and the Console. Queries, renders, asset loads,
+Only recorded tool calls appear: edits from the Inspector, the viewport
+gizmo, the Scene panel, the Assets panel, and the Console. Queries, renders, asset loads,
 and `sim.step` run without being recorded.
 
 ## The Console
@@ -272,8 +318,8 @@ The toolbar at the end of the menu bar has **Play**, **Pause**,
   valid, and the clock is restored.
 
 While playing, editing is disabled: the Inspector is read-only (it still
-shows the live values), the Scene panel's add and delete controls, the
-Assets panel's buttons, undo
+shows the live values), the gizmo is hidden, the Scene panel's add and
+delete controls, the Assets panel's buttons, undo
 and redo, the Delete key, and File > Open and Save are greyed out or
 ignored. Selecting still works. Console lines still run, but they are not
 recorded, since Stop discards whatever they changed, and `history.*`
@@ -303,3 +349,11 @@ shin-editor mygame --screenshot editor.png
 renders one full editor frame of the project, 1600 × 900 pixels, without
 opening a window, writes it to the PNG, and exits. The editor's own tests
 use it, and the image at the top of this page was made with it.
+
+```sh
+shin-editor mygame --screenshot editor-gizmo.png --select cube
+```
+
+selects the entity named `cube` first, so the frame shows its highlight
+and gizmo, as in the [gizmo](#moving-rotating-and-scaling-with-the-gizmo)
+image. An unknown name is an error.
