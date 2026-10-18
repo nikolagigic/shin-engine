@@ -68,7 +68,8 @@ egui editor, RON scenes, project scaffolding, MCP, and Rhai scripting. Readabili
 | `tool`   | `Tool` trait, `ToolRegistry`, `ToolOutput`                 | GE-013, GE-015 |
 | `headless` | window-less engine handle for tools, tests, benchmarks   | GE-013         |
 | `project` | `shin.toml` manifest, `project::create` scaffolding, `project.new` | GE-018 |
-| crate `shin-mcp`   | MCP server library + stdio binary; `--project`; calls go through `command::apply` | GE-014, GE-026, GE-027 |
+| `project::skills` | agent skills embedded from `skills/*/SKILL.md`; written to `.claude/skills/` by `create` | GE-039 |
+| crate `shin-mcp`   | MCP server library + stdio binary; `--project`; calls go through `command::apply`; skills as prompts, skills + guide as resources | GE-014, GE-026, GE-027, GE-039 |
 | `scene`  | `.scene.ron` files: `SceneFile`, `save`/`load`, `scene.save`/`scene.load` | GE-021 |
 | `command` | `History` (undo/redo over tool calls), `Tool::affected`, `history.*` | GE-022 |
 | `headless::play` | `PlayState`, `Headless::play/pause/stop`, `sim.*` tools | GE-024 |
@@ -123,7 +124,8 @@ builds are incremental.
    created (`worktree-GE-NNN`) or `GE-NNN-short-slug`; the PR title, not
    the branch, carries the ticket ID.
 3. Implement only what the ticket's **In scope** lists. The ticket's
-   **Docs** section says which `guide/src/` pages you touch; the public
+   **Docs** section says which `guide/src/` pages and which agent skills
+   (`skills/<name>/SKILL.md`) you touch; the public
    user guide is mdBook under `guide/` (`docs/` is private planning and is
    not in the repository). If something in
    **Out of scope** turns out to be required, stop and report it; do not
@@ -148,11 +150,14 @@ builds are incremental.
 - [ ] New public items have a doc comment.
 - [ ] If the ticket adds a user-facing capability and GE-013 is merged: a
       tool is registered for it and tested through `ToolRegistry::call`.
-- [ ] If the ticket is user-facing: the relevant `guide/src/` page is
-      updated or added in the same branch, and if any tool changed the
-      tools reference is regenerated
+- [ ] If the ticket is user-facing: the relevant `guide/src/` page and
+      the relevant `skills/*/SKILL.md` (agent skills; `cargo test -p
+      shin-cli skills` checks the tool names they mention) are updated or
+      added in the same branch, and if any tool changed the tools
+      reference is regenerated
       (`cargo run -p shin-cli -- docs tools > guide/src/reference/tools.md`).
-      The review request names the pages (or says "none: not user-facing").
+      The review request names the pages and skills (or says "none: not
+      user-facing").
 - [ ] Review request sent to the tech lead mapping each AC to evidence.
 
 ## T-shirt sizing (for reference)

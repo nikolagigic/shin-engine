@@ -24,7 +24,8 @@
 //! the cube with those actions), `assets/cube.gltf` + `assets/cube.bin`,
 //! `assets/sounds/blip.wav` + `scripts/moon.rhai` (the moon blips once per
 //! revolution; GE-036), `.mcp.json` (runs the game with `--mcp`),
-//! `.gitignore`, and `README.md`.
+//! `.gitignore`, `README.md`, and for agents (GE-039) a `CLAUDE.md` and
+//! every [`skills::SKILLS`] entry as `.claude/skills/<name>/SKILL.md`.
 //!
 //! An open project (GE-026, [`Headless::open_project`]) is marked by the
 //! [`ProjectRoot`] resource; the `project.open` and `project.info` tools
@@ -41,6 +42,8 @@ use crate::headless::Headless;
 use crate::input::InputConfig;
 use crate::scene::{AudioDesc, CameraDesc, EntityDesc, LightDesc, SceneFile, TransformDesc};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
+
+pub mod skills;
 
 /// Name of the project manifest in a project's root directory.
 pub const MANIFEST: &str = "shin.toml";
@@ -244,6 +247,9 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
 /// The starter `src/main.rs`. It reads its window settings from `shin.toml`
 /// at run time, so it needs no substitution.
 const MAIN_RS: &str = include_str!("project/template/main.rs");
+/// The project's `CLAUDE.md`, notes for agents; `{name}` is replaced by the
+/// project name.
+const CLAUDE_MD: &str = include_str!("project/template/CLAUDE.md");
 /// The starter's player script, attached to the cube: moves it with the
 /// `move_x`, `move_z`, and `jump` actions of [`starter_input`].
 const PLAYER_RHAI: &str = include_str!("project/template/player.rhai");
@@ -287,7 +293,7 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
     let mut project = Project::new(&opts.name);
     project.entry_scene = Some(PathBuf::from(STARTER_SCENE));
     project.input = starter_input();
-    let files: [(&str, Vec<u8>); 12] = [
+    let mut files: Vec<(String, Vec<u8>)> = [
         ("Cargo.toml", cargo_toml(&opts.name, &opts.engine)?.into()),
         (MANIFEST, project.to_toml()?.into()),
         ("src/main.rs", MAIN_RS.into()),
@@ -300,7 +306,16 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
         (".mcp.json", MCP_JSON.into()),
         (".gitignore", "/target\n".into()),
         ("README.md", readme(&opts.name).into()),
-    ];
+        ("CLAUDE.md", CLAUDE_MD.replace("{name}", &opts.name).into()),
+    ]
+    .into_iter()
+    .map(|(path, contents)| (path.to_string(), contents))
+    .collect();
+    files.extend(
+        skills::SKILLS
+            .iter()
+            .map(|skill| (skill_path(skill.name), skill.text.as_bytes().to_vec())),
+    );
 
     let mut written = Vec::with_capacity(files.len());
     for (relative, contents) in files {
@@ -313,6 +328,12 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
     }
     log::info!("created project `{}` in {}", opts.name, dir.display());
     Ok(written)
+}
+
+/// Where [`create`] writes the skill called `name`, relative to the project
+/// root: `.claude/skills/<name>/SKILL.md`, where Claude Code finds it.
+pub fn skill_path(name: &str) -> String {
+    format!(".claude/skills/{name}/SKILL.md")
 }
 
 /// Where [`create`] writes the starter scene, relative to the project root;
@@ -569,6 +590,8 @@ scenes/         scene files (.scene.ron)
 scripts/        Rhai scripts (player.rhai drives the cube; moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)
 .mcp.json       runs the game with --mcp for agents
+CLAUDE.md       project notes for agents
+.claude/skills/ agent skills: building scenes, debugging frames, scripting
 ```
 "#
     )
@@ -747,8 +770,27 @@ mod tests {
                 ".mcp.json",
                 ".gitignore",
                 "README.md",
+                "CLAUDE.md",
+                ".claude/skills/shin-scene-building/SKILL.md",
+                ".claude/skills/shin-visual-debugging/SKILL.md",
+                ".claude/skills/shin-scripting/SKILL.md",
+                ".claude/skills/shin-project/SKILL.md",
             ]
         );
+        let claude = fs::read_to_string(dir.join("CLAUDE.md"))?;
+        assert!(claude.starts_with("# demo-game\n"), "{claude}");
+        assert!(!claude.contains("{name}"), "{claude}");
+        for skill in skills::SKILLS {
+            assert_eq!(
+                fs::read_to_string(dir.join(skill_path(skill.name)))?,
+                skill.text
+            );
+            assert!(
+                claude.contains(skill.name),
+                "CLAUDE.md lists {}",
+                skill.name
+            );
+        }
         assert_eq!(fs::read(dir.join(STARTER_SOUND))?, crate::audio::blip_wav());
         assert!(
             fs::read_to_string(dir.join(MOON_SCRIPT))?.contains("play_sound_at(entity"),

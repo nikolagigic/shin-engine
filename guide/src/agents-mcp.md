@@ -134,6 +134,37 @@ cargo run -q -p shin-mcp <<'EOF'
 EOF
 ```
 
+## Prompts and resources
+
+Besides tools, both servers offer the engine's [agent skills](agents-skills.md)
+and this guide, so an agent can learn how to use the tools from the
+server itself.
+
+- **Prompts.** `prompts/list` returns one prompt per skill
+  (`shin-scene-building`, `shin-visual-debugging`, `shin-scripting`,
+  `shin-project`) with its description and one optional argument, `goal`.
+  `prompts/get` returns the skill's Markdown as a single user message,
+  followed by a `## Your goal` section when `goal` is given. Claude Code
+  shows MCP prompts as slash commands, e.g.
+  `/mcp__shin__shin-scene-building a red crate on a green floor`.
+- **Resources.** `resources/list` returns every skill as
+  `shin://skills/<name>` and every page of this guide as
+  `shin://guide/<page>`, where `<page>` is the page's path without `.md`:
+  `shin://guide/scripting`, `shin://guide/reference/tools`.
+  `resources/read` returns the Markdown (`text/markdown`). Guide pages are
+  the book's sources, so `\{{#include}}` lines appear unexpanded.
+
+```text
+prompts/get     {"name": "shin-scripting", "arguments": {"goal": "make the moon spin"}}
+-> one user message: the shin-scripting skill, then "## Your goal\n\nmake the moon spin"
+
+resources/read  {"uri": "shin://guide/agents-mcp"}
+-> {"contents": [{"uri": "shin://guide/agents-mcp", "mimeType": "text/markdown", "text": "# Agents and MCP ..."}]}
+```
+
+An unknown prompt is an invalid-params error and an unknown resource a
+resource-not-found error, both naming what was asked for.
+
 ## Adding a project tool
 
 Agents get the engine's tools plus the game's own. The starter

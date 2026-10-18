@@ -11,6 +11,7 @@
 - [Scripting](scripting.md)
 - [Audio](audio.md)
 - [Agents and MCP](agents-mcp.md)
+- [Agent skills](agents-skills.md)
 
 # Reference
 

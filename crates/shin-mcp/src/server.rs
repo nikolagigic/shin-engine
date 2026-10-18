@@ -1,12 +1,15 @@
 //! The rmcp [`ServerHandler`]: lists the registry's tools and forwards calls
-//! to the engine thread, mapping engine types to MCP types.
+//! to the engine thread, mapping engine types to MCP types. Prompts and
+//! resources (skills and guide pages) come from [`crate::library`].
 
 use std::sync::Arc;
 
 use base64::Engine as _;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams,
+    GetPromptResponse, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities,
+    ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -14,6 +17,7 @@ use serde_json::Value;
 use shin::tool::{ToolError, ToolInfo, ToolOutput};
 
 use crate::engine_thread::EngineHandle;
+use crate::library;
 
 /// MCP server exposing every tool in an `shin::tool::ToolRegistry`.
 #[derive(Clone)]
@@ -36,15 +40,24 @@ impl EngineServer {
 
 impl ServerHandler for EngineServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(
-                "Drives a headless instance of the engine. Call `engine.info` for \
-                 its state and `engine.list_tools` for the available tools.",
-            )
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(
+            "Drives a headless instance of the engine. Call `engine.info` for \
+                 its state and `engine.list_tools` for the available tools. Prompts are \
+                 skills: step-by-step guides for building scenes, debugging frames, \
+                 scripting, and projects. Resources are the skills (shin://skills/<name>) \
+                 and the user guide (shin://guide/<page>).",
+        )
     }
 
     async fn list_tools(
@@ -63,6 +76,38 @@ impl ServerHandler for EngineServer {
         let args = Value::Object(request.arguments.unwrap_or_default());
         let result = self.engine.call(request.name.into_owned(), args).await;
         Ok(to_call_result(result)?.into())
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult::with_all_items(library::prompts()))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        Ok(library::get_prompt(&request.name, request.arguments.as_ref())?.into())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(library::resources()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        Ok(library::read_resource(&request.uri)?.into())
     }
 }
 
