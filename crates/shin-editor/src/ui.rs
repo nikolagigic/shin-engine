@@ -1,12 +1,13 @@
 //! The editor's UI: File, Edit, and View menus above an `egui_dock` area
-//! with six panels: Viewport (centre), Scene (left), Inspector and History
-//! (right), and Log and Console (below the viewport).
+//! with seven panels: Viewport (centre), Scene and Assets (left), Inspector
+//! and History (right), and Log and Console (below the viewport).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
 //! orbit-camera moves. The Scene panel lists entities (click to select) and
 //! adds and deletes them; the Inspector ([`crate::inspector`]) edits the
-//! selected one. Edits are not made here: the UI pushes [`Action`]s that
-//! [`crate::editor::EditorCore`] runs after the UI pass.
+//! selected one; the Assets panel ([`crate::assets`]) lists the project's
+//! files and uses them. Edits are not made here: the UI pushes [`Action`]s
+//! that [`crate::editor::EditorCore`] runs after the UI pass.
 //!
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
 //! undoes and Ctrl+Shift+Z redoes (also in an empty console), Delete or
@@ -17,6 +18,8 @@
 //! the Scene panel's add and delete controls, undo and redo, the Delete
 //! key, and File > Open and Save are greyed out or ignored (entities can
 //! still be selected).
+
+use std::path::Path;
 
 use egui::{
     Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, TextureId, Ui,
@@ -30,6 +33,7 @@ use shin::headless::Headless;
 use shin::math::{Transform, Vec2};
 use shin::scene::TransformDesc;
 
+use crate::assets::AssetBrowser;
 use crate::edit::entity_id;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
@@ -42,6 +46,8 @@ pub enum Tab {
     Viewport,
     /// The entities in the world.
     Scene,
+    /// The project's meshes, textures, scenes, and scripts (GE-032).
+    Assets,
     /// Properties of the selected entity.
     Inspector,
     /// The most recent log lines.
@@ -53,8 +59,9 @@ pub enum Tab {
 }
 
 /// The panels the View menu can hide and show; the Viewport always stays.
-pub const CLOSEABLE_TABS: [Tab; 5] = [
+pub const CLOSEABLE_TABS: [Tab; 6] = [
     Tab::Scene,
+    Tab::Assets,
     Tab::Inspector,
     Tab::History,
     Tab::Log,
@@ -95,11 +102,17 @@ pub enum Action {
     Edit(Edit),
     /// File > Open: load the project's entry scene.
     Open,
+    /// Assets panel Open: load this project-relative scene file and make
+    /// it the one Save writes.
+    OpenScene(String),
     /// File > Save: save to the current scene path.
     Save,
     /// File > Save As: save to this project-relative path and make it the
     /// current one.
     SaveAs(String),
+    /// Assets panel Import: copy the file at this absolute path into the
+    /// project's `assets/` and rescan.
+    Import(String),
     /// Toolbar Play: snapshot the scene and start (or resume) playing.
     Play,
     /// Toolbar Pause: toggle pause while playing.
@@ -110,11 +123,12 @@ pub enum Action {
 
 impl Action {
     /// Whether this action edits the scene or its history, which is not
-    /// allowed while playing. Console lines and the toolbar are allowed.
+    /// allowed while playing. Console lines, the toolbar, and Import
+    /// (which only copies a file) are allowed.
     pub fn is_edit(&self) -> bool {
         !matches!(
             self,
-            Self::Console(_) | Self::Play | Self::Pause | Self::Stop
+            Self::Console(_) | Self::Import(_) | Self::Play | Self::Pause | Self::Stop
         )
     }
 }
@@ -156,16 +170,17 @@ pub fn parse_console_line(line: &str) -> Result<(&str, Value), String> {
     Ok((tool, args))
 }
 
-/// The initial layout: Scene takes the left 18%, Inspector the right 22%
-/// of what remains with History under it, and Log and Console share the
-/// bottom quarter under the Viewport side by side.
+/// The initial layout: Scene takes the left 18% with Assets under it,
+/// Inspector the right 22% of what remains with History under it, and Log
+/// and Console share the bottom quarter under the Viewport side by side.
 ///
 /// An `egui_dock` split fraction is the share of the left (or top) child,
 /// whichever side the new tabs go on.
 pub fn default_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);
     let surface = dock.main_surface_mut();
-    let [centre, _scene] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Scene]);
+    let [centre, scene] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Scene]);
+    let [_scene, _assets] = surface.split_below(scene, 0.5, vec![Tab::Assets]);
     let [centre, inspector] = surface.split_right(centre, 0.78, vec![Tab::Inspector]);
     let [_inspector, _history] = surface.split_below(inspector, 0.55, vec![Tab::History]);
     let [_viewport, log] = surface.split_below(centre, 0.75, vec![Tab::Log]);
@@ -211,6 +226,10 @@ pub struct EditorUi<'a> {
     pub selection: &'a mut Selection,
     /// The Inspector's edit buffers.
     pub inspector: &'a mut Inspector,
+    /// The Assets panel's entries and fields.
+    pub assets: &'a mut AssetBrowser,
+    /// The open project's directory, which the Assets panel scans.
+    pub project_dir: &'a Path,
     /// Text fields of the Scene panel and File menu.
     pub fields: &'a mut Fields,
     /// The scene file Save writes, relative to the project; shown in the
@@ -560,6 +579,16 @@ impl TabViewer for EditorUi<'_> {
         match tab {
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Scene => self.scene_ui(ui),
+            Tab::Assets => {
+                let editing = !self.engine.play_state().is_playing();
+                self.assets.ui(
+                    ui,
+                    self.project_dir,
+                    self.selection.0,
+                    editing,
+                    self.actions,
+                );
+            }
             Tab::Inspector => {
                 // Read-only while playing: it still shows the live values.
                 let editing = !self.engine.play_state().is_playing();
@@ -586,7 +615,7 @@ impl TabViewer for EditorUi<'_> {
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
             Tab::Viewport | Tab::Log | Tab::Console => [false, false],
-            Tab::Scene | Tab::Inspector | Tab::History => [true, true],
+            Tab::Scene | Tab::Assets | Tab::Inspector | Tab::History => [true, true],
         }
     }
 }
@@ -622,7 +651,7 @@ fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
     let surface = dock.main_surface_mut();
     let root = NodeIndex::root();
     match tab {
-        Tab::Scene => {
+        Tab::Scene | Tab::Assets => {
             surface.split_left(root, 0.18, vec![tab]);
         }
         Tab::Inspector | Tab::History => {
@@ -644,6 +673,7 @@ mod tests {
         for tab in [
             Tab::Viewport,
             Tab::Scene,
+            Tab::Assets,
             Tab::Inspector,
             Tab::Log,
             Tab::History,

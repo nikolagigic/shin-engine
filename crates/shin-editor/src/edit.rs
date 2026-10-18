@@ -150,6 +150,24 @@ pub fn commit_mesh(
     Ok(())
 }
 
+/// Gives `entity` the base-colour texture at texture asset `source`, or
+/// removes its texture when `source` is `None`, with one recorded
+/// `entity.set_texture`.
+pub fn commit_texture(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    source: Option<&str>,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "entity.set_texture",
+        json!({ "entity": entity_id(entity), "source": source }),
+    )?;
+    Ok(())
+}
+
 /// Attaches the Rhai script at `path` (relative to the project directory)
 /// to `entity`, or removes its script when `path` is empty, with one
 /// recorded `script.attach`. Returns the compile error, if any; the script

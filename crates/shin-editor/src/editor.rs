@@ -13,7 +13,7 @@
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
 //! an offscreen target instead of the surface).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -26,11 +26,12 @@ use shin::ecs::{Entity, Name};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
 use shin::math::Camera;
-use shin::project::Project;
+use shin::project::{Project, ProjectRoot};
 use shin::render::{MeshInstance, begin_mesh_pass};
 use shin::tool::{ToolOutput, ToolRegistry};
 use winit::window::Window;
 
+use crate::assets::{self, AssetBrowser};
 use crate::edit;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
@@ -68,8 +69,16 @@ pub struct EditorCore {
     quit: bool,
     /// The open project's manifest.
     project: Project,
+    /// The open project's directory (canonical), which the Assets panel
+    /// scans and Import copies into.
+    project_dir: PathBuf,
     selection: Selection,
     inspector: Inspector,
+    /// The Assets panel (GE-032).
+    assets: AssetBrowser,
+    /// Whether the Assets tab was docked last frame; docking it again
+    /// (View menu) rescans at once.
+    assets_docked: bool,
     fields: Fields,
     /// The scene file Save writes, relative to the project.
     scene_path: String,
@@ -96,6 +105,7 @@ impl EditorCore {
         // The target is resized to the Viewport panel once it is laid out.
         let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
         let project = scene::open(&mut engine, project_dir)?;
+        let project_dir = engine.resources.expect::<ProjectRoot>().0.clone();
         let clock = PlayClock::new(engine.fixed_dt);
         Ok(Self {
             clock,
@@ -112,8 +122,11 @@ impl EditorCore {
             quit: false,
             scene_path: scene::default_path(&project),
             project,
+            project_dir,
             selection: Selection::default(),
             inspector: Inspector::default(),
+            assets: AssetBrowser::default(),
+            assets_docked: false,
             fields: Fields::default(),
             saved: Vec::new(),
         })
@@ -144,6 +157,13 @@ impl EditorCore {
         let egui_ctx = self.egui.clone();
         let mut actions = Vec::new();
         self.drop_dead_selection();
+        // Opening the Assets panel (View menu) rescans the project at once;
+        // while it is shown it checks for changes on its own.
+        let assets_docked = self.dock.find_tab(&Tab::Assets).is_some();
+        if assets_docked && !self.assets_docked {
+            self.assets.invalidate();
+        }
+        self.assets_docked = assets_docked;
         let mut full = egui_ctx.run_ui(input, |ui| {
             EditorUi {
                 engine: &self.engine,
@@ -153,6 +173,8 @@ impl EditorCore {
                 console: &mut self.console,
                 selection: &mut self.selection,
                 inspector: &mut self.inspector,
+                assets: &mut self.assets,
+                project_dir: &self.project_dir,
                 fields: &mut self.fields,
                 scene_path: &self.scene_path,
                 actions: &mut actions,
@@ -326,22 +348,32 @@ impl EditorCore {
             Action::Edit(Edit::Mesh(entity, source)) => {
                 edit::commit_mesh(reg, engine, entity, &source)?;
             }
+            Action::Edit(Edit::Texture(entity, source)) => {
+                edit::commit_texture(reg, engine, entity, source.as_deref())?;
+            }
             Action::Edit(Edit::Script(entity, path)) => {
                 // A compile error is logged by the engine and shown in the
                 // inspector; the script stays attached.
                 edit::commit_script(reg, engine, entity, &path)?;
             }
-            Action::Open => self.open()?,
+            Action::Open => self.open_scene(scene::default_path(&self.project))?,
+            Action::OpenScene(path) => self.open_scene(path)?,
             Action::Save => self.save_as(self.scene_path.clone())?,
             Action::SaveAs(path) => self.save_as(path)?,
+            Action::Import(path) => {
+                let imported = assets::import(&self.project_dir, Path::new(&path))
+                    .with_context(|| format!("importing {path}"))?;
+                log::info!("imported {path} as {}", imported.display());
+                self.assets.invalidate();
+            }
         }
         Ok(())
     }
 
-    /// File > Open: loads the project's entry scene (not an undoable edit:
-    /// the history starts over) and makes it the scene Save writes.
-    fn open(&mut self) -> anyhow::Result<()> {
-        let path = scene::default_path(&self.project);
+    /// File > Open and the Assets panel's Open: loads the scene file at
+    /// `path` (relative to the project; not an undoable edit: the history
+    /// starts over) and makes it the scene Save writes.
+    fn open_scene(&mut self, path: String) -> anyhow::Result<()> {
         self.registry
             .call(&mut self.engine, "scene.load", json!({ "path": path }))
             .with_context(|| format!("opening {path}"))?;
@@ -1241,6 +1273,200 @@ mod tests {
 
         core.try_run(Action::Edit(Edit::Script(cube, String::new())))?;
         assert!(entities(&mut core)?[1].get("script").is_none(), "cleared");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-032: the Assets panel's action paths. Spawn and Assign (mesh,
+    /// texture, script) are each one undoable edit; Open loads a scene
+    /// file and makes it the one Save writes; Import copies a file into
+    /// `assets/` and the panel lists it.
+    #[test]
+    fn assets_panel_spawn_assign_open_and_import() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("assets-panel")?;
+        let test_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../shin-engine/assets/test");
+        // A second mesh whose image is the PNG next to it, and a script.
+        std::fs::copy(
+            test_assets.join("textured_cube.gltf"),
+            project_dir.join("assets/crate.gltf"),
+        )?;
+        std::fs::copy(
+            test_assets.join("checker.png"),
+            project_dir.join("assets/checker.png"),
+        )?;
+        std::fs::create_dir_all(project_dir.join("scripts"))?;
+        std::fs::write(
+            project_dir.join("scripts/lift.rhai"),
+            "fn update(entity, dt) { entity.transform.translation.y += dt; }",
+        )?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        // The panel is in the default layout, so one frame scans the project.
+        frame(&mut core, &gpu, &target, Vec::new());
+        let sources = |core: &EditorCore| -> Vec<String> {
+            core.assets
+                .entries()
+                .iter()
+                .map(|e| e.source.to_string())
+                .collect()
+        };
+        assert_eq!(
+            sources(&core),
+            [
+                "assets/checker.png",
+                "assets/crate.gltf",
+                "assets/crate.gltf#image=0",
+                "assets/cube.gltf",
+                "scenes/main.scene.ron",
+                "scripts/lift.rhai",
+            ]
+        );
+        let starter = core.engine.world.len();
+
+        // Spawn: the mesh entry's source, at the orbit target, selected.
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Spawn("assets/crate.gltf".to_string()),
+        )?;
+        assert_eq!(core.engine.world.len(), starter + 1);
+        let spawned = core.selection.0.expect("the new entity is selected");
+        assert_eq!(
+            core.engine.world.get::<&Name>(spawned)?.0,
+            "crate",
+            "named after the file"
+        );
+        assert_eq!(
+            core.engine.world.get::<&Transform>(spawned)?.translation,
+            core.orbit.target
+        );
+
+        // Assign to selection: mesh, texture (and its removal), script.
+        let cube = named(&core, "cube");
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Mesh(cube, "assets/crate.gltf".to_string())),
+        )?;
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Texture(
+                cube,
+                Some("assets/crate.gltf#image=0".to_string()),
+            )),
+        )?;
+        let instance = *core.engine.world.get::<&MeshInstance>(cube)?;
+        let state = core.engine.resources.expect::<shin::render::RenderState>();
+        assert_eq!(
+            state
+                .textures
+                .source(instance.texture.expect("textured"))
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("assets/crate.gltf#image=0")
+        );
+        run_undo_redo(&mut core, None, Action::Edit(Edit::Texture(cube, None)))?;
+        assert_eq!(core.engine.world.get::<&MeshInstance>(cube)?.texture, None);
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Script(cube, "scripts/lift.rhai".to_string())),
+        )?;
+        assert_eq!(
+            core.engine
+                .world
+                .get::<&shin::script::Script>(cube)?
+                .path
+                .to_string_lossy(),
+            "scripts/lift.rhai"
+        );
+        // Five actions (spawn and four assigns), each one history entry.
+        assert_eq!(core.engine.resources.expect::<History>().undo_len(), 5);
+
+        // Open: save a copy, then open it from the panel; the history
+        // starts over and Save targets the copy.
+        core.try_run(Action::SaveAs("scenes/copy.scene.ron".to_string()))?;
+        core.assets.invalidate();
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert!(
+            sources(&core).contains(&"scenes/copy.scene.ron".to_string()),
+            "{:?}",
+            sources(&core)
+        );
+        core.try_run(Action::Despawn(cube))?;
+        assert!(core.is_dirty());
+        core.try_run(Action::OpenScene("scenes/copy.scene.ron".to_string()))?;
+        assert_eq!(core.scene_path, "scenes/copy.scene.ron");
+        assert!(!core.is_dirty());
+        assert_eq!(core.engine.resources.expect::<History>().undo_len(), 0);
+        assert!(
+            core.engine
+                .world
+                .query::<(Entity, &Name)>()
+                .iter()
+                .any(|(_, n)| n.0 == "cube"),
+            "the cube is back from the saved copy"
+        );
+        let err = core
+            .try_run(Action::OpenScene("scenes/none.scene.ron".to_string()))
+            .expect_err("a missing scene fails");
+        assert!(err.to_string().contains("scenes/none.scene.ron"), "{err}");
+
+        // Import: an absolute path is copied into assets/ and listed (its
+        // image is the checker.png already there).
+        let gltf = test_assets.join("textured_cube.gltf").canonicalize()?;
+        core.try_run(Action::Import(gltf.to_string_lossy().into_owned()))?;
+        assert!(project_dir.join("assets/textured_cube.gltf").is_file());
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert!(
+            sources(&core).contains(&"assets/textured_cube.gltf#image=0".to_string()),
+            "{:?}",
+            sources(&core)
+        );
+        let err = core
+            .try_run(Action::Import(gltf.to_string_lossy().into_owned()))
+            .expect_err("importing the same name twice fails");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        let err = core
+            .try_run(Action::Import("relative.png".to_string()))
+            .expect_err("a relative path fails");
+        assert!(format!("{err:#}").contains("absolute"), "{err:#}");
+
+        // The imported file's entries can be used like any other.
+        let cube = named(&core, "cube");
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Texture(
+                cube,
+                Some("assets/textured_cube.gltf#image=0".to_string()),
+            )),
+        )?;
+
+        // While playing, the panel's edits are refused but Import is not.
+        core.try_run(Action::Play)?;
+        for action in [
+            Action::Spawn("assets/crate.gltf".to_string()),
+            Action::Edit(Edit::Texture(cube, None)),
+            Action::OpenScene("scenes/copy.scene.ron".to_string()),
+        ] {
+            let err = core.try_run(action.clone()).expect_err("refused");
+            assert!(
+                err.to_string().contains("while playing"),
+                "{action:?}: {err}"
+            );
+        }
+        assert!(!Action::Import(String::new()).is_edit());
+        core.try_run(Action::Stop)?;
+
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
