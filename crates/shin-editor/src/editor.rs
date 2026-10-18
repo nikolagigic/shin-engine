@@ -286,8 +286,20 @@ impl EditorCore {
             }
             Action::Spawn(source) => {
                 let name = spawn_name(&source);
-                let entity = edit::spawn(reg, engine, &source, self.orbit.target, name.as_deref())?;
+                // GE-031: with a selection, the new entity is its child.
+                let parent = self.selection.0.filter(|&e| engine.world.contains(e));
+                let entity = edit::spawn(
+                    reg,
+                    engine,
+                    &source,
+                    self.orbit.target,
+                    name.as_deref(),
+                    parent,
+                )?;
                 self.selection.0 = Some(entity);
+            }
+            Action::Reparent { entity, parent } => {
+                edit::set_parent(reg, engine, entity, parent)?;
             }
             Action::Despawn(entity) => {
                 edit::despawn(reg, engine, entity)?;
@@ -1241,6 +1253,130 @@ mod tests {
 
         core.try_run(Action::Edit(Edit::Script(cube, String::new())))?;
         assert!(entities(&mut core)?[1].get("script").is_none(), "cleared");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-031's editor criterion through the action path: reparent (what a
+    /// drag onto a row asks for), undo and redo it, save, and the file
+    /// shows the nesting; "+" with a selection adds a child; Unparent
+    /// keeps the world position.
+    #[test]
+    fn tree_reparent_undo_and_save_nests() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("tree")?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        let cube = named(&core, "cube");
+        let moon = named(&core, "moon");
+        let moon_world = shin::ecs::world_transform(&core.engine.world, moon);
+        let before = entities(&mut core)?;
+
+        core.try_run(Action::Reparent {
+            entity: moon,
+            parent: Some(cube),
+        })?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), Some(cube));
+        let world = shin::ecs::world_transform(&core.engine.world, moon);
+        assert!(
+            world.translation.abs_diff_eq(moon_world.translation, 1e-5),
+            "the moon stays put: {world:?}"
+        );
+        // The tree draws without trouble with a branch in it.
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Undo)?;
+        assert_eq!(entities(&mut core)?, before, "reparenting is undone");
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), None);
+        core.try_run(Action::Redo)?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), Some(cube));
+
+        // "+ Sphere" with the moon selected adds a grandchild of the cube
+        // at the orbit target.
+        core.selection.0 = Some(moon);
+        core.try_run(Action::Spawn("builtin://sphere".to_string()))?;
+        let sphere = named(&core, "sphere");
+        assert_eq!(core.selection.0, Some(sphere));
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, sphere), Some(moon));
+        let at = shin::ecs::world_transform(&core.engine.world, sphere).translation;
+        assert!(at.abs_diff_eq(core.orbit.target, 1e-4), "{at}");
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Save)?;
+        let saved = std::fs::read_to_string(project_dir.join("scenes/main.scene.ron"))?;
+        let scene = shin::scene::SceneFile::from_ron(&saved)?;
+        let cube_desc = scene
+            .entities
+            .iter()
+            .find(|e| e.name.as_deref() == Some("cube"))
+            .expect("cube is a root");
+        assert_eq!(cube_desc.children.len(), 1, "{saved}");
+        assert_eq!(cube_desc.children[0].name.as_deref(), Some("moon"));
+        assert_eq!(
+            cube_desc.children[0].children[0].name.as_deref(),
+            Some("sphere")
+        );
+        assert!(
+            !scene
+                .entities
+                .iter()
+                .any(|e| e.name.as_deref() == Some("moon")),
+            "the moon is not also a root: {saved}"
+        );
+
+        // Reopening gives the same tree.
+        core.try_run(Action::Open)?;
+        let moon = named(&core, "moon");
+        assert_eq!(
+            shin::ecs::parent_of(&core.engine.world, moon),
+            Some(named(&core, "cube"))
+        );
+
+        // Unparent (the context menu) keeps the world position.
+        let world_before = shin::ecs::world_transform(&core.engine.world, moon);
+        core.try_run(Action::Reparent {
+            entity: moon,
+            parent: None,
+        })?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), None);
+        let world_after = shin::ecs::world_transform(&core.engine.world, moon);
+        assert!(
+            world_after
+                .translation
+                .abs_diff_eq(world_before.translation, 1e-5)
+        );
+
+        // Deleting a parent deletes its subtree, undoably.
+        let cube = named(&core, "cube");
+        let sphere = named(&core, "sphere");
+        core.try_run(Action::Reparent {
+            entity: sphere,
+            parent: Some(cube),
+        })?;
+        core.try_run(Action::Despawn(cube))?;
+        assert!(!core.engine.world.contains(sphere), "the child goes too");
+        core.try_run(Action::Undo)?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, sphere), Some(cube));
+
+        // While playing, reparenting is refused like any edit.
+        core.try_run(Action::Play)?;
+        let err = core
+            .try_run(Action::Reparent {
+                entity: sphere,
+                parent: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("while playing"), "{err}");
+        core.try_run(Action::Stop)?;
+
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

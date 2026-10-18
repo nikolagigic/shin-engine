@@ -12,7 +12,7 @@
 use anyhow::Context as _;
 use serde_json::{Value, json};
 use shin::command;
-use shin::ecs::Entity;
+use shin::ecs::{Entity, world_transform};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec3};
 use shin::render::MeshInstance;
@@ -41,7 +41,9 @@ fn apply(
 }
 
 /// Spawns an entity drawing the mesh at asset `source` (for example
-/// `builtin://cube`) at `at`, named `name` if given, and returns it.
+/// `builtin://cube`) at world position `at`, named `name` if given, and
+/// returns it. With a `parent` (GE-031) the entity is spawned as its child:
+/// `at` is converted into the parent's space, so it still appears at `at`.
 ///
 /// The mesh is loaded with `asset.load` (not recorded: loading changes no
 /// entity) and the entity created with one recorded `entity.spawn`.
@@ -51,14 +53,32 @@ pub fn spawn(
     source: &str,
     at: Vec3,
     name: Option<&str>,
+    parent: Option<Entity>,
 ) -> anyhow::Result<Entity> {
     let loaded = apply(reg, engine, "asset.load", json!({ "source": source }))?;
     let mesh = loaded["handle"]
         .as_u64()
         .with_context(|| format!("{source} is not a mesh source"))?;
-    let mut args = json!({ "mesh": mesh, "translation": at.to_array() });
+    let translation = match parent {
+        Some(parent) => {
+            let local = Transform::from_translation(at)
+                .relative_to(&world_transform(&engine.world, parent))
+                .translation;
+            anyhow::ensure!(
+                local.is_finite(),
+                "cannot add under entity #{}: it has a zero scale component",
+                entity_id(parent)
+            );
+            local
+        }
+        None => at,
+    };
+    let mut args = json!({ "mesh": mesh, "translation": translation.to_array() });
     if let Some(name) = name {
         args["name"] = json!(name);
+    }
+    if let Some(parent) = parent {
+        args["parent"] = json!(entity_id(parent));
     }
     let spawned = apply(reg, engine, "entity.spawn", args)?;
     spawned["entity"]
@@ -74,6 +94,28 @@ pub fn despawn(reg: &ToolRegistry, engine: &mut Headless, entity: Entity) -> any
         engine,
         "entity.despawn",
         json!({ "entity": entity_id(entity) }),
+    )?;
+    Ok(())
+}
+
+/// Makes `parent` the parent of `entity` (or makes `entity` a root with
+/// `None`), keeping its world transform, with one recorded
+/// `entity.set_parent` (GE-031).
+pub fn set_parent(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    parent: Option<Entity>,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "entity.set_parent",
+        json!({
+            "entity": entity_id(entity),
+            "parent": parent.map(entity_id),
+            "keep_world": true,
+        }),
     )?;
     Ok(())
 }
@@ -200,6 +242,7 @@ mod tests {
             "builtin://cube",
             Vec3::new(1.0, 2.0, 3.0),
             Some("box"),
+            None,
         )?;
         Ok((reg, engine, entity))
     }
@@ -238,8 +281,36 @@ mod tests {
     #[test]
     fn spawn_rejects_an_unknown_builtin() -> anyhow::Result<()> {
         let (reg, mut engine, _) = setup()?;
-        assert!(spawn(&reg, &mut engine, "builtin://torus", Vec3::ZERO, None).is_err());
+        assert!(spawn(&reg, &mut engine, "builtin://torus", Vec3::ZERO, None, None).is_err());
         assert_eq!(undo_len(&engine), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn tree_spawn_under_a_parent_and_set_parent_undo() -> anyhow::Result<()> {
+        let (reg, mut engine, parent) = setup()?;
+        commit_transform(
+            &reg,
+            &mut engine,
+            parent,
+            &TransformDesc {
+                translation: [1.0, 2.0, 3.0],
+                rotation_euler_deg: [0.0, 90.0, 0.0],
+                scale: [2.0, 2.0, 2.0],
+            },
+        )?;
+        let at = Vec3::new(4.0, 0.0, -1.0);
+        let child = spawn(&reg, &mut engine, "builtin://cube", at, None, Some(parent))?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), Some(parent));
+        let world = world_transform(&engine.world, child).translation;
+        assert!(world.abs_diff_eq(at, 1e-5), "added where asked: {world}");
+
+        set_parent(&reg, &mut engine, child, None)?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), None);
+        let world = world_transform(&engine.world, child).translation;
+        assert!(world.abs_diff_eq(at, 1e-5), "keep_world: {world}");
+        command::undo(&mut engine)?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), Some(parent));
         Ok(())
     }
 

@@ -99,7 +99,13 @@ changes the entity, as does `entity.transform.translation.y = 1.0`.
 |--------|---------|
 | `.id` | The entity's id, the same number the tools use; read-only. |
 | `.name` | Its name, or an empty string; read-only. |
-| `.transform` | Its `Transform`; readable and writable. |
+| `.transform` | Its `Transform`, **local to its parent** (world space for an entity without one); readable and writable. |
+| `.world_transform` | Its `Transform` in world space, after its parents', as it was at the start of the step. Read-only: it is a copy, and changing it changes nothing. |
+
+An entity's [parent](scenes.md#children) moves it along. A script on a
+child that sets `entity.transform.translation` places the child relative
+to its parent, so it keeps following the parent. To find out where the
+entity really is, read `entity.world_transform`.
 
 ### Functions
 
