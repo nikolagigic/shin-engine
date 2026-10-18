@@ -327,7 +327,8 @@ impl InstanceRaw {
 /// (plus a translucent variant for [`render_overlay`]).
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
-    /// The same shader alpha-blended, depth-tested without depth writes.
+    /// The same shader alpha-blended, depth-tested with `LessEqual` (so an
+    /// overlay exactly on a drawn surface shows) without depth writes.
     overlay_pipeline: wgpu::RenderPipeline,
     /// Texture layout and sampler, shared with every [`TextureRegistry`]
     /// made from this renderer.
@@ -432,7 +433,7 @@ impl MeshRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = |label, blend, depth_write| {
+        let pipeline = |label, blend, depth_write: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -451,7 +452,12 @@ impl MeshRenderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(depth_write),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    // The overlay draws on surfaces it coincides with.
+                    depth_compare: Some(if depth_write {
+                        wgpu::CompareFunction::Less
+                    } else {
+                        wgpu::CompareFunction::LessEqual
+                    }),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -1027,7 +1033,8 @@ pub struct OverlayDraw {
 /// Draws `draws` as tinted, translucent meshes over what `color` and
 /// `depth` already hold (after [`render_world`]), as seen by the
 /// [`Camera`] resource: alpha-blended, hidden behind nearer opaque
-/// surfaces, and not writing depth. For editor overlays such as collider
+/// surfaces (but shown on surfaces it coincides with, such as a collider
+/// exactly the size of its mesh), and not writing depth. For editor overlays such as collider
 /// shapes (GE-034); [`render_world`] never draws them.
 ///
 /// Draws whose mesh is not in the registry are skipped.
@@ -1208,7 +1215,14 @@ mod tests {
                 color: [1.0, 0.0, 0.0, alpha],
             };
             let (color, depth) = (&engine.target.color_view, &engine.target.depth_view);
-            render_overlay(&mut engine.resources, &engine.gpu, color, depth, 1.0, &[draw]);
+            render_overlay(
+                &mut engine.resources,
+                &engine.gpu,
+                color,
+                depth,
+                1.0,
+                &[draw],
+            );
             engine.target.read_pixels(&engine.gpu)
         };
         let opaque = overlay(&mut engine, 1.0)?.get_pixel(16, 16).0;

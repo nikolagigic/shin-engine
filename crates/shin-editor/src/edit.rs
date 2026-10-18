@@ -15,6 +15,7 @@ use shin::command;
 use shin::ecs::{Entity, world_transform};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec3};
+use shin::physics::{Collider, RigidBody, ShapeDesc};
 use shin::render::MeshInstance;
 use shin::scene::TransformDesc;
 use shin::tool::{ToolOutput, ToolRegistry};
@@ -244,6 +245,47 @@ pub fn commit_camera(
         "camera.set",
         json!({ "position": position.to_array(), "look_at": look_at.to_array() }),
     )?;
+    Ok(())
+}
+
+/// Gives `entity` the rigid `body` (GE-034), or removes its body with
+/// `None`, with one recorded `physics.set_body`.
+pub fn commit_body(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    body: Option<RigidBody>,
+) -> anyhow::Result<()> {
+    let args = match body {
+        Some(body) => json!({
+            "entity": entity_id(entity),
+            "kind": body.kind,
+            "mass": body.mass,
+        }),
+        None => json!({ "entity": entity_id(entity), "kind": null }),
+    };
+    apply(reg, engine, "physics.set_body", args)?;
+    Ok(())
+}
+
+/// Gives `entity` the `collider` (GE-034), or removes its collider with
+/// `None`, with one recorded `physics.set_collider`.
+pub fn commit_collider(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    collider: Option<Collider>,
+) -> anyhow::Result<()> {
+    let args = match collider {
+        Some(collider) => json!({
+            "entity": entity_id(entity),
+            "shape": ShapeDesc::from(collider.shape),
+            "friction": collider.friction,
+            "restitution": collider.restitution,
+        }),
+        None => json!({ "entity": entity_id(entity), "shape": null }),
+    };
+    apply(reg, engine, "physics.set_collider", args)?;
     Ok(())
 }
 
