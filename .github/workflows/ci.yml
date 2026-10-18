@@ -28,7 +28,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: actions/cache@v4
@@ -58,7 +58,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install Mesa lavapipe (software Vulkan)
         run: |
           sudo apt-get update
@@ -108,7 +108,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: actions/cache@v4
@@ -135,7 +135,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: actions/cache@v4
@@ -163,7 +163,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install mdBook from the release tarball
         run: |
           mkdir -p "$HOME/.local/bin"
