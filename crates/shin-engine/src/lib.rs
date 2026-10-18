@@ -18,6 +18,7 @@
 //! - [`scene`]  — `.scene.ron` scene files, `scene.save`/`scene.load` (GE-021)
 //! - [`command`] — undo/redo history over tool calls, `history.*` (GE-022)
 //! - [`script`] — Rhai gameplay scripts, `script.*`             (GE-011)
+//! - [`audio`]  — sound sources and one-shot playback, `audio.*` (GE-036)
 //!
 //! The MCP server lives in the separate `shin-mcp` crate (GE-014) and is
 //! a thin transport over `tool::ToolRegistry` (GE-013). The engine lib never
@@ -27,6 +28,7 @@
 
 pub mod app;
 pub mod asset;
+pub mod audio;
 pub mod command;
 pub mod ecs;
 pub mod gpu;

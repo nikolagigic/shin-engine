@@ -25,7 +25,8 @@
 //! alone.
 //!
 //! A snapshot holds, per entity, the components the editing tools change:
-//! [`Transform`], [`MeshInstance`], [`Name`], and [`Script`]. Restoring one keeps every
+//! [`Transform`], [`MeshInstance`], [`Name`], [`Script`], and
+//! [`AudioSource`]. Restoring one keeps every
 //! entity's [`Entity`] id (via `World::spawn_at`), so ids handed out by
 //! `entity.spawn` stay valid across undo and redo. Other components on a
 //! restored entity are kept if it is alive and lost if it is respawned.
@@ -57,6 +58,7 @@ use serde_json::Value;
 
 pub use tools::register_tools;
 
+use crate::audio::AudioSource;
 use crate::ecs::{Entity, Name, World};
 use crate::headless::Headless;
 use crate::math::{Camera, Transform};
@@ -110,6 +112,7 @@ struct EntityState {
     instance: Option<MeshInstance>,
     name: Option<Name>,
     script: Option<Script>,
+    audio: Option<AudioSource>,
 }
 
 impl EntityState {
@@ -120,6 +123,7 @@ impl EntityState {
             instance: world.get::<&MeshInstance>(entity).ok().map(|i| *i),
             name: world.get::<&Name>(entity).ok().map(|n| (*n).clone()),
             script: world.get::<&Script>(entity).ok().map(|s| (*s).clone()),
+            audio: world.get::<&AudioSource>(entity).ok().map(|a| (*a).clone()),
         }
     }
 }
@@ -226,6 +230,7 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
         let _ = world.remove_one::<MeshInstance>(entity);
         let _ = world.remove_one::<Name>(entity);
         let _ = world.remove_one::<Script>(entity);
+        let _ = world.remove_one::<AudioSource>(entity);
     } else {
         world.spawn_at(entity, ());
     }
@@ -240,6 +245,9 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
     }
     if let Some(script) = &state.script {
         world.insert_one(entity, script.clone())?;
+    }
+    if let Some(audio) = &state.audio {
+        world.insert_one(entity, audio.clone())?;
     }
     Ok(())
 }

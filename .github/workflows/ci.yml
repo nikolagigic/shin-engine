@@ -23,6 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA headers (cpal, for the audio backend)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: actions/cache@v4
@@ -49,6 +53,10 @@ jobs:
       WGPU_BACKEND: vulkan
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA headers (cpal, for the audio backend)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - name: Install Mesa lavapipe (software Vulkan)
         run: |
           sudo apt-get update
@@ -95,6 +103,10 @@ jobs:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA headers (cpal, for the audio backend)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: actions/cache@v4
@@ -119,6 +131,10 @@ jobs:
       MDBOOK_VERSION: v0.5.4
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA headers (cpal, for the audio backend)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - name: Install mdBook from the release tarball
         run: |
           mkdir -p "$HOME/.local/bin"

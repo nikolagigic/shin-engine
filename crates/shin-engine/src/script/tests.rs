@@ -515,3 +515,99 @@ fn scene_files_carry_the_script() -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+/// A temp project dir with the starter blip at `assets/sounds/blip.wav`.
+fn dir_with_blip(test: &str) -> anyhow::Result<PathBuf> {
+    let dir = temp_dir(test);
+    std::fs::create_dir_all(dir.join("assets/sounds"))?;
+    std::fs::write(dir.join("assets/sounds/blip.wav"), crate::audio::blip_wav())?;
+    Ok(dir)
+}
+
+/// GE-036: `play_sound` and `play_sound_at` play through the engine's
+/// audio (silent here); a sound that cannot load is logged and does not
+/// stop the script.
+#[test]
+fn scripts_play_sounds() -> anyhow::Result<()> {
+    use crate::audio::AudioEngine;
+
+    let dir = dir_with_blip("sounds")?;
+    let reg = ToolRegistry::with_engine_tools();
+    let (mut engine, id) = engine_in(&dir, &reg)?;
+    engine.resources.insert(AudioEngine::silent());
+    write_script(
+        &dir,
+        "scripts/noisy.rhai",
+        "fn update(entity, dt) {\n    play_sound(\"assets/sounds/blip.wav\");\n    \
+         play_sound_at(entity, \"assets/sounds/blip.wav\");\n    \
+         play_sound(\"assets/sounds/nope.ogg\");\n}\n",
+        0,
+    );
+    let attached = call(
+        &reg,
+        &mut engine,
+        "script.attach",
+        json!({ "entity": id, "path": "scripts/noisy.rhai" }),
+    );
+    assert_eq!(attached["error"], Value::Null);
+
+    engine.step(1);
+    let plays = |engine: &Headless| engine.resources.expect::<AudioEngine>().plays();
+    assert_eq!(plays(&engine), 0, "scripts do not run while editing");
+    call(&reg, &mut engine, "sim.play", json!({}));
+    engine.step(2);
+    assert_eq!(
+        plays(&engine),
+        4,
+        "two good sounds per step; the bad one is skipped"
+    );
+    assert_eq!(
+        engine.resources.expect::<ScriptEngine>().errors().count(),
+        0
+    );
+    call(&reg, &mut engine, "sim.stop", json!({}));
+    assert_eq!(engine.resources.expect::<AudioEngine>().playing(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// GE-036: the starter project's moon script blips once per revolution
+/// (every 2π seconds of play).
+#[test]
+fn starter_moon_script_blips_once_per_revolution() -> anyhow::Result<()> {
+    use crate::audio::AudioEngine;
+
+    let dir = dir_with_blip("starter-moon")?;
+    write_script(
+        &dir,
+        "scripts/moon.rhai",
+        include_str!("../project/template/moon.rhai"),
+        0,
+    );
+    let reg = ToolRegistry::with_engine_tools();
+    let (mut engine, id) = engine_in(&dir, &reg)?;
+    engine.resources.insert(AudioEngine::silent());
+    call(
+        &reg,
+        &mut engine,
+        "script.attach",
+        json!({ "entity": id, "path": "scripts/moon.rhai" }),
+    );
+    call(&reg, &mut engine, "sim.play", json!({}));
+    let plays = |engine: &Headless| engine.resources.expect::<AudioEngine>().plays();
+    // One revolution is 2π s, about 377 steps at 60 Hz.
+    engine.step(370);
+    assert_eq!(plays(&engine), 0, "no blip before the first revolution");
+    engine.step(10);
+    assert_eq!(plays(&engine), 1, "one blip after the first revolution");
+    engine.step(370);
+    assert_eq!(plays(&engine), 1);
+    engine.step(10);
+    assert_eq!(plays(&engine), 2, "and one per revolution after that");
+    assert_eq!(
+        engine.resources.expect::<ScriptEngine>().errors().count(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
