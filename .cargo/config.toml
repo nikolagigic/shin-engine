@@ -1,6 +1,6 @@
-# The shared build cache across worktrees is set via environment, not here,
-# because config paths are relative to the checkout. See CLAUDE.md "Build cache".
+# Each worktree builds into its own target/; never share CARGO_TARGET_DIR
+# between worktrees (see CLAUDE.md "Build directory").
 
 [alias]
 check-all = "clippy --workspace --all-targets --all-features -- -D warnings"
-test-all = "test --workspace --all-targets"
+test-all = "test --workspace --all-targets --no-fail-fast"
