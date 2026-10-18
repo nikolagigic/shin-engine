@@ -1,9 +1,18 @@
 # Shin Engine
 
 [![CI](https://github.com/nikolagigic/shin-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nikolagigic/shin-engine/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/shin-engine.svg)](https://crates.io/crates/shin-engine)
+![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)
 
 A small, fast, cross-platform 3D engine that humans, scripts, and AI agents
 all drive through the same API.
+
+```sh
+cargo install shin-cli shin-editor && shin new my-game
+```
+
+Shin is **pre-alpha**: expect breaking changes between 0.x releases. See
+[`CHANGELOG.md`](CHANGELOG.md) for what each release contains.
 
 Shin is open source and written end-to-end in Rust. The crates.io package is
 `shin-engine`; the library is `shin` (`use shin::...`).
@@ -42,7 +51,8 @@ button to look around; Escape quits.
 ## Create a project
 
 ```sh
-cargo run -p shin-cli -- new my-game --dir ~/games
+cargo install shin-cli
+shin new my-game --dir ~/games
 cd ~/games/my-game && cargo run
 ```
 
@@ -50,9 +60,10 @@ cd ~/games/my-game && cargo run
 Cargo project in `<dir>/<name>` (default: the current directory): a
 `shin.toml` with the project name and window settings, a `src/main.rs` that
 draws a lit cube on a ground slab with the fly camera, and the cube's glTF
-in `assets/`. The project depends on the engine's git repository; pass
-`--engine-path <checkout>/crates/shin-engine` to build against a local
-checkout instead. Agents do the same through the `project.new` tool.
+in `assets/`. The project depends on the published `shin-engine` crate;
+pass `--engine-path <checkout>/crates/shin-engine` to build against a
+local checkout instead (from a checkout, `cargo run -p shin-cli --`
+stands in for `shin`). Agents do the same through the `project.new` tool.
 
 ## Philosophy
 

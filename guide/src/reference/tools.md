@@ -258,7 +258,7 @@ Creates a runnable game project in `<dir>/<name>` (Cargo.toml, shin.toml, src/ma
 | Argument | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `dir` | string | yes |  | Parent directory; the project is created in `<dir>/<name>`. |
-| `engine_path` | string | no |  | Path to a local `crates/shin-engine` to depend on instead of the engine's git repository. |
+| `engine_path` | string | no |  | Path to a local `crates/shin-engine` to depend on instead of the published `shin-engine` on crates.io. |
 | `name` | string | yes |  | Project and Cargo package name: ASCII letters, digits, `-` and `_`, not starting with a digit. |
 
 ## `scene.save`

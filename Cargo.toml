@@ -7,10 +7,18 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/nikolagigic/shin-engine"
+homepage = "https://nikolagigic.github.io/shin-engine/"
+readme = "README.md"
 
 # Every dependency is pinned here. Crates use `{ workspace = true }`.
 # Do NOT add dependencies in a crate Cargo.toml without adding them here first.
 [workspace.dependencies]
+# The workspace's own crates: the path builds them here, the version is
+# what `cargo publish` writes into the published manifests. Bump both
+# with the workspace version.
+shin-engine = { path = "crates/shin-engine", version = "0.1.0" }
+shin-mcp = { path = "crates/shin-mcp", version = "0.1.0" }
 # Windowing & input
 winit = "0.30"
 # GPU

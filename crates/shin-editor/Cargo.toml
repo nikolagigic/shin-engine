@@ -4,14 +4,20 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "The Shin editor: an egui application around a live engine viewport."
+keywords = ["gamedev", "engine", "editor", "egui"]
+categories = ["game-engines", "gui"]
+include = ["src/**"]
 
 [[bin]]
 name = "shin-editor"
 path = "src/main.rs"
 
 [dependencies]
-shin-engine = { path = "../shin-engine" }
+shin-engine = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }

@@ -10,6 +10,12 @@
 //!
 //! Guide pages are the mdBook sources, so `{{#include}}` lines appear as
 //! written rather than expanded.
+//!
+//! The pages are embedded from `crates/shin-mcp/guide/`, a snapshot of the
+//! repository's `guide/src/*.md` kept inside this crate so it ships with
+//! the published package (GE-037). `guide/src/` stays the source of truth;
+//! a test fails when the snapshot differs and `UPDATE_GUIDE=1 cargo test
+//! -p shin-mcp guide` refreshes it.
 
 use rmcp::ErrorData;
 use rmcp::model::{
@@ -25,13 +31,10 @@ const GUIDE_URI: &str = "shin://guide/";
 /// MIME type of every resource.
 const MARKDOWN: &str = "text/markdown";
 
-/// Embeds `guide/src/<page>.md` from the repository root.
+/// Embeds `<page>.md` from this crate's snapshot of `guide/src/`.
 macro_rules! page {
     ($page:literal) => {
-        (
-            $page,
-            include_str!(concat!("../../../guide/src/", $page, ".md")),
-        )
+        ($page, include_str!(concat!("../guide/", $page, ".md")))
     };
 }
 
@@ -153,15 +156,66 @@ mod tests {
         }
     }
 
+    /// The guide's sources at the repository root.
+    fn guide_src() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../guide/src")
+    }
+
+    /// This crate's snapshot of them, which [`GUIDE_PAGES`] embeds.
+    fn guide_snapshot() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guide")
+    }
+
+    /// Every page under `root`, sorted.
+    fn pages_in(root: &Path) -> Vec<String> {
+        let mut pages = Vec::new();
+        md_pages(root, root, &mut pages);
+        pages.sort();
+        pages
+    }
+
     #[test]
     fn every_guide_page_is_a_resource() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../guide/src");
-        let mut on_disk = Vec::new();
-        md_pages(&root, &root, &mut on_disk);
-        on_disk.sort();
         let mut served: Vec<String> = GUIDE_PAGES.iter().map(|(p, _)| p.to_string()).collect();
         served.sort();
-        assert_eq!(served, on_disk, "add new guide pages to GUIDE_PAGES");
+        assert_eq!(
+            served,
+            pages_in(&guide_src()),
+            "add new guide pages to GUIDE_PAGES"
+        );
+    }
+
+    /// The snapshot in `crates/shin-mcp/guide/` is exactly `guide/src/*.md`.
+    /// With `UPDATE_GUIDE=1` it is rewritten from `guide/src/` instead.
+    #[test]
+    fn guide_snapshot_matches_the_guide() {
+        let (src, snapshot) = (guide_src(), guide_snapshot());
+        let pages = pages_in(&src);
+        if std::env::var("UPDATE_GUIDE").is_ok_and(|v| v == "1") {
+            if snapshot.exists() {
+                std::fs::remove_dir_all(&snapshot).unwrap();
+            }
+            for page in &pages {
+                let to = snapshot.join(format!("{page}.md"));
+                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                std::fs::copy(src.join(format!("{page}.md")), &to).unwrap();
+            }
+            eprintln!("UPDATE_GUIDE: wrote {} pages", pages.len());
+            return;
+        }
+        let refresh = "refresh it with `UPDATE_GUIDE=1 cargo test -p shin-mcp guide`";
+        assert_eq!(
+            pages_in(&snapshot),
+            pages,
+            "crates/shin-mcp/guide/ lists other pages than guide/src/; {refresh}"
+        );
+        for page in &pages {
+            let read = |root: &Path| std::fs::read_to_string(root.join(format!("{page}.md")));
+            assert!(
+                read(&snapshot).unwrap() == read(&src).unwrap(),
+                "crates/shin-mcp/guide/{page}.md differs from guide/src/{page}.md; {refresh}"
+            );
+        }
     }
 
     #[test]
