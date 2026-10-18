@@ -23,6 +23,7 @@ use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::input::Actions;
 use crate::math::{Camera, Projection, Transform, Vec3};
+use crate::physics::{PhysicsWorld, physics_system};
 use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
 use crate::scene;
@@ -59,12 +60,13 @@ pub struct Headless {
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
     /// offscreen target, with an empty world and a schedule holding
-    /// [`frame_stats_system`] (frame) and [`script_system`] (fixed):
-    /// [`Self::from_parts`] with empty parts and that schedule.
+    /// [`frame_stats_system`] (frame), then [`script_system`] and
+    /// [`physics_system`] (fixed): [`Self::from_parts`] with empty parts and
+    /// that schedule.
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
     /// [`default_light`]; [`default_camera`]; [`PlayState::Edit`]; an [`Assets`] cache
-    /// rooted at the current working directory; and empty [`Actions`]
+    /// rooted at the current working directory; an empty [`PhysicsWorld`]; and empty [`Actions`]
     /// (a project's are installed by [`Self::load_project`]). [`Self::render_fn`]
     /// draws the world with [`render_world`], so spawning an entity with a
     /// `Transform` and a `MeshInstance` is enough to see it.
@@ -86,12 +88,14 @@ impl Headless {
     /// `schedule`, and wraps them here.
     ///
     /// `world` and `schedule` are used as given; nothing is added to the
-    /// schedule (add [`frame_stats_system`] for frame statistics and
-    /// [`script_system`] for [`crate::script::Script`]s). Each
+    /// schedule (add [`frame_stats_system`] for frame statistics,
+    /// [`script_system`] for [`crate::script::Script`]s, and
+    /// [`physics_system`] for rigid bodies). Each
     /// resource [`Self::new`] installs that `resources` lacks is inserted
     /// with the same default: [`Time`], [`FrameStats`], a [`RenderState`]
-    /// with [`default_light`], [`default_camera`], [`PlayState::Edit`], and
-    /// [`Assets`] rooted at the working directory. Resources already present are kept.
+    /// with [`default_light`], [`default_camera`], [`PlayState::Edit`],
+    /// [`Assets`] rooted at the working directory, and a [`PhysicsWorld`].
+    /// Resources already present are kept.
     /// `resources` should not hold a [`RenderState`]: GPU objects made on
     /// another device cannot be drawn here. [`Self::render_fn`] draws the
     /// world with [`render_world`].
@@ -157,6 +161,9 @@ impl Headless {
         }
         if resources.get::<Actions>().is_none() {
             resources.insert(Actions::new());
+        }
+        if resources.get::<PhysicsWorld>().is_none() {
+            resources.insert(PhysicsWorld::default());
         }
         let render_fn: RenderFn = Box::new(|world, res, ctx, color, depth| {
             let size = color.texture().size();
@@ -366,11 +373,13 @@ fn check_size((width, height): (u32, u32)) -> anyhow::Result<()> {
 }
 
 /// The schedule [`Headless::new`] starts with: [`frame_stats_system`] per
-/// frame and [`script_system`] per fixed step.
+/// frame, and per fixed step [`script_system`] then [`physics_system`]
+/// (so kinematic bodies follow what scripts did in the same step).
 fn default_schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_frame("frame_stats", frame_stats_system);
     schedule.add_fixed("script", script_system);
+    schedule.add_fixed("physics", physics_system);
     schedule
 }
 

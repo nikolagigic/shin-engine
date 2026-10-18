@@ -345,6 +345,8 @@ fn starter_scene() -> SceneFile {
         color: Some(color),
         texture: None,
         script: (name == "cube").then(|| STARTER_SCRIPT.to_string()),
+        body: None,
+        collider: None,
         children: Vec::new(),
     };
     SceneFile {

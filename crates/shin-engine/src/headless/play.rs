@@ -6,6 +6,8 @@
 //! and the ids of the captured entities, and stores it in the [`PlayState`]
 //! resource. While playing, [`Headless::step`] (or `sim.step`, or the
 //! editor's own fixed-timestep loop) runs the fixed systems as usual.
+//! Physics bodies are created from the components by the first step of
+//! play and torn down by [`Headless::stop`] ([`PhysicsWorld::clear`]).
 //! [`Headless::stop`] loads the snapshot back with [`scene::apply`],
 //! respawns each entity under the id it had before play (so ids handed out
 //! by `entity.spawn`, the editor's selection, and the command history stay
@@ -13,7 +15,7 @@
 //!
 //! Only what a scene file holds survives a play session: entities with a
 //! [`Transform`] (their transform, mesh, colour, texture, name, script,
-//! and parent), the
+//! parent, rigid body, and collider), the
 //! camera, and the light. Other components and entities without a
 //! transform are gone after [`Headless::stop`].
 //!
@@ -29,6 +31,7 @@ use serde_json::{Value, json};
 use super::Headless;
 use crate::ecs::{Children, Entity, Name, Parent, Time};
 use crate::math::Transform;
+use crate::physics::{Collider, PhysicsWorld, RigidBody};
 use crate::render::MeshInstance;
 use crate::scene::{self, SceneFile};
 use crate::script::Script;
@@ -150,8 +153,9 @@ impl Headless {
         }
     }
 
-    /// Stops playing: restores the scene, entity ids, and [`Time`] captured
-    /// by [`Self::play`] and sets [`PlayState::Edit`]. Returns `false`
+    /// Stops playing: tears down the physics simulation, restores the
+    /// scene, entity ids, and [`Time`] captured by [`Self::play`], and sets
+    /// [`PlayState::Edit`]. Returns `false`
     /// (and changes nothing) if nothing was playing.
     ///
     /// Fails, still playing, if the snapshot cannot be loaded back.
@@ -169,6 +173,9 @@ impl Headless {
         )
         .context("cannot stop: the play snapshot did not load")?;
         restore_ids(&mut self.world, &spawned, &snapshot.ids)?;
+        if let Some(physics) = self.resources.get_mut::<PhysicsWorld>() {
+            physics.clear();
+        }
         self.resources.insert(snapshot.time);
         self.resources.insert(PlayState::Edit);
         log::info!("stop");
@@ -200,6 +207,8 @@ fn restore_ids(
         Option<Script>,
         Option<Parent>,
         Option<Children>,
+        Option<RigidBody>,
+        Option<Collider>,
     );
     let rows: Vec<Row> = spawned
         .iter()
@@ -220,11 +229,15 @@ fn restore_ids(
                     .get::<&Children>(entity)
                     .ok()
                     .map(|c| Children(c.0.iter().map(|&child| remap(child)).collect())),
+                world.get::<&RigidBody>(entity).ok().map(|b| *b),
+                world.get::<&Collider>(entity).ok().map(|c| *c),
             )
         })
         .collect();
     world.clear();
-    for (&id, (transform, instance, name, script, parent, children)) in ids.iter().zip(rows) {
+    for (&id, (transform, instance, name, script, parent, children, body, collider)) in
+        ids.iter().zip(rows)
+    {
         let mut builder = hecs::EntityBuilder::new();
         builder.add(transform);
         if let Some(instance) = instance {
@@ -241,6 +254,12 @@ fn restore_ids(
         }
         if let Some(children) = children {
             builder.add(children);
+        }
+        if let Some(body) = body {
+            builder.add(body);
+        }
+        if let Some(collider) = collider {
+            builder.add(collider);
         }
         world.spawn_at(id, builder.build());
     }
@@ -266,7 +285,8 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "sim.stop",
         "Leaves play mode and restores the scene (every entity with its id, transform, \
-         mesh, colour, texture, and name; the camera; the light) and the simulation time \
+         mesh, colour, texture, name, script, parent, rigid body, and collider; the camera; \
+         the light) and the simulation time \
          to what they were at sim.play. Returns `stopped` (false if nothing was playing), \
          `state`, and `entities`, the number of entities restored.",
         sim_stop,
