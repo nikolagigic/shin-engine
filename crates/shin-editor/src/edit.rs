@@ -16,7 +16,7 @@ use shin::ecs::{Entity, world_transform};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec3};
 use shin::render::MeshInstance;
-use shin::scene::TransformDesc;
+use shin::scene::{AudioDesc, TransformDesc};
 use shin::tool::{ToolOutput, ToolRegistry};
 
 /// The id tools use for `entity` (`entity.list`, `entity.spawn`, ...).
@@ -227,6 +227,42 @@ pub fn commit_script(
         json!({ "entity": entity_id(entity), "path": path }),
     )?;
     Ok(out["error"].as_str().map(str::to_string))
+}
+
+/// Sets `entity`'s sound to `audio` (source, volume, looping, spatial,
+/// autoplay), or removes it when `audio` is `None`, with one recorded
+/// `entity.set_audio` (GE-036).
+pub fn commit_audio(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    audio: Option<&AudioDesc>,
+) -> anyhow::Result<()> {
+    let args = match audio {
+        Some(audio) => json!({
+            "entity": entity_id(entity),
+            "source": audio.source,
+            "volume": audio.volume,
+            "looping": audio.looping,
+            "spatial": audio.spatial,
+            "autoplay": audio.autoplay,
+        }),
+        None => json!({ "entity": entity_id(entity), "source": null }),
+    };
+    apply(reg, engine, "entity.set_audio", args)?;
+    Ok(())
+}
+
+/// Plays the sound at asset `source` once, at full volume, with
+/// `audio.play` (not recorded: it changes no entity). The Inspector's
+/// preview button.
+pub fn preview_sound(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    source: &str,
+) -> anyhow::Result<()> {
+    apply(reg, engine, "audio.play", json!({ "source": source }))?;
+    Ok(())
 }
 
 /// Moves the scene's camera to `position`, aimed at `look_at` with +Y up
@@ -488,6 +524,52 @@ mod tests {
         assert_eq!(instance(&engine, entity).mesh, sphere);
         assert!(commit_mesh(&reg, &mut engine, entity, "no/such.gltf").is_err());
         assert_eq!(instance(&engine, entity).mesh, sphere);
+        Ok(())
+    }
+
+    /// GE-036: the Inspector's audio commits are one undoable entry each,
+    /// and its preview plays without being recorded.
+    #[test]
+    fn commit_audio_undo_redo_and_preview() -> anyhow::Result<()> {
+        use shin::asset::Assets;
+        use shin::audio::{AudioEngine, AudioSource};
+
+        let (reg, mut engine, entity) = setup()?;
+        let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../shin-engine");
+        engine.resources.insert(Assets::new(engine_dir));
+        engine.resources.insert(AudioEngine::silent());
+        let audio = |engine: &Headless| {
+            engine
+                .world
+                .get::<&AudioSource>(entity)
+                .ok()
+                .map(|a| AudioDesc::from_source(&a))
+        };
+        let blip = AudioDesc {
+            source: "assets/sounds/blip.wav".into(),
+            spatial: true,
+            ..Default::default()
+        };
+        commit_audio(&reg, &mut engine, entity, Some(&blip))?;
+        assert_eq!(audio(&engine), Some(blip.clone()));
+        let quieter = AudioDesc {
+            volume: 0.5,
+            ..blip.clone()
+        };
+        commit_audio(&reg, &mut engine, entity, Some(&quieter))?;
+        commit_audio(&reg, &mut engine, entity, None)?;
+        assert_eq!(audio(&engine), None);
+        assert_eq!(undo_len(&engine), 4);
+        command::undo(&mut engine)?;
+        assert_eq!(audio(&engine), Some(quieter));
+        command::undo(&mut engine)?;
+        assert_eq!(audio(&engine), Some(blip));
+        command::undo(&mut engine)?;
+        assert_eq!(audio(&engine), None);
+
+        preview_sound(&reg, &mut engine, "assets/sounds/blip.wav")?;
+        assert_eq!(engine.resources.expect::<AudioEngine>().plays(), 1);
+        assert_eq!(undo_len(&engine), 1, "previews are not recorded");
         Ok(())
     }
 }

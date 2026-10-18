@@ -19,6 +19,7 @@ use super::{
     Entity, Name, Time, World, despawn_recursive, parent_of, set_parent, subtree, world_transform,
 };
 use crate::asset::{AssetSource, with_assets};
+use crate::audio::{AudioSource, audio_json};
 use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
@@ -43,8 +44,9 @@ pub fn register_tools(reg: &mut ToolRegistry) {
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
          (Euler degrees, XYZ), and scale (all local to the parent), world_translation, \
-         parent id if it has one, name and script path if it has them, and mesh, colour, \
-         and texture (a handle or null) if the entity draws one.",
+         parent id if it has one, name, script path, and audio (source, volume, looping, \
+         spatial, autoplay) if it has them, and mesh, colour, and texture (a handle or null) \
+         if the entity draws one.",
         entity_list,
     ));
     reg.register(
@@ -246,9 +248,10 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             Option<&MeshInstance>,
             Option<&Name>,
             Option<&Script>,
+            Option<&AudioSource>,
         )>()
         .iter()
-        .map(|(entity, transform, instance, name, script)| {
+        .map(|(entity, transform, instance, name, script, audio)| {
             let mut row = transform_json(transform);
             row["entity"] = json!(entity_id(entity));
             row["world_translation"] = json!(world_transform(world, entity).translation.to_array());
@@ -260,6 +263,9 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             }
             if let Some(script) = script {
                 row["script"] = json!(script.path.to_string_lossy());
+            }
+            if let Some(audio) = audio {
+                row["audio"] = audio_json(audio);
             }
             if let Some(instance) = instance {
                 row["mesh"] = json!(instance.mesh.0);

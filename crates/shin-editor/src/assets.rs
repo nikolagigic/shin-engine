@@ -378,6 +378,7 @@ mod tests {
             [
                 "assets/cube.gltf",
                 "scenes/main.scene.ron",
+                "scripts/moon.rhai",
                 "scripts/player.rhai"
             ]
         );
@@ -390,7 +391,7 @@ mod tests {
             !browser.sync(&dir, t0 + Duration::from_millis(500)),
             "not checked before the interval"
         );
-        assert_eq!(sources(&browser).len(), 3);
+        assert_eq!(sources(&browser).len(), 4);
         assert!(
             browser.sync(&dir, t0 + RESCAN_INTERVAL),
             "checked at the interval, and the directory changed"
@@ -401,6 +402,7 @@ mod tests {
                 "assets/checker.png",
                 "assets/cube.gltf",
                 "scenes/main.scene.ron",
+                "scripts/moon.rhai",
                 "scripts/player.rhai"
             ]
         );
@@ -414,7 +416,7 @@ mod tests {
         fs::remove_file(dir.join("assets/checker.png"))?;
         browser.invalidate();
         assert!(browser.sync(&dir, t0 + 2 * RESCAN_INTERVAL + Duration::from_millis(1)));
-        assert_eq!(sources(&browser).len(), 3);
+        assert_eq!(sources(&browser).len(), 4);
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }

@@ -364,6 +364,10 @@ impl EditorCore {
             Action::Edit(Edit::Mesh(entity, source)) => {
                 edit::commit_mesh(reg, engine, entity, &source)?;
             }
+            Action::Edit(Edit::Audio(entity, audio)) => {
+                edit::commit_audio(reg, engine, entity, audio.as_ref())?;
+            }
+            Action::PreviewSound(source) => edit::preview_sound(reg, engine, &source)?,
             Action::Edit(Edit::Texture(entity, source)) => {
                 edit::commit_texture(reg, engine, entity, source.as_deref())?;
             }
@@ -579,9 +583,8 @@ fn spawn_name(source: &str) -> Option<String> {
         AssetSource::Builtin(name) => Some(name),
         AssetSource::File { path, .. }
         | AssetSource::Image { path }
-        | AssetSource::GltfImage { path, .. } => {
-            Some(path.file_stem()?.to_string_lossy().into_owned())
-        }
+        | AssetSource::GltfImage { path, .. }
+        | AssetSource::Audio { path } => Some(path.file_stem()?.to_string_lossy().into_owned()),
     }
 }
 
@@ -1574,6 +1577,7 @@ mod tests {
                 "assets/cube.gltf",
                 "scenes/main.scene.ron",
                 "scripts/lift.rhai",
+                "scripts/moon.rhai",
                 "scripts/player.rhai",
             ]
         );

@@ -140,6 +140,8 @@ pub enum Action {
     Pause,
     /// Toolbar Stop: restore the scene from the play snapshot.
     Stop,
+    /// Play the sound at this asset source once, as a preview (GE-036).
+    PreviewSound(String),
     /// Inspector "View from scene camera": move the viewport's orbit camera
     /// to the scene camera's placement. Not an edit.
     ViewFromSceneCamera,
@@ -151,7 +153,8 @@ pub enum Action {
 impl Action {
     /// Whether this action edits the scene or its history, which is not
     /// allowed while playing. Console lines, the toolbar, Import (which
-    /// only copies a file), and View from scene camera are allowed.
+    /// only copies a file), View from scene camera, and sound previews are
+    /// allowed.
     pub fn is_edit(&self) -> bool {
         !matches!(
             self,
@@ -161,6 +164,7 @@ impl Action {
                 | Self::Pause
                 | Self::Stop
                 | Self::ViewFromSceneCamera
+                | Self::PreviewSound(_)
         )
     }
 }

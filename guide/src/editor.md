@@ -98,6 +98,7 @@ The Inspector shows `Entity #<id>` and these rows for the selected entity:
 | **Mesh**         | A drop-down of every mesh source loaded so far plus `builtin://cube` and `builtin://sphere`, and a text field for any asset source (press Enter). See [asset sources](scenes.md#asset-sources). | `entity.set_mesh` |
 | **Colour**       | A colour picker for the mesh's linear RGBA tint, with alpha. Picking previews live and records one edit when the pointer is released. Only shown for entities that draw a mesh. | `entity.set_color` |
 | **Script**       | The path of the entity's Rhai script, relative to the project (`scripts/name.rhai`); commits when the field loses focus. Clearing it removes the script. The script's latest compile or runtime error, if any, is shown in red below the grid. | `script.attach` |
+| **Audio**        | The entity's sound, an `.ogg` or `.wav` path; commits when the field loses focus, and clearing it removes the sound. **▶ Play** previews it (not recorded). Once the entity has a sound, a **Volume** drag value and **Loop**, **Spatial**, and **Autoplay** checkboxes appear. See [Audio](audio.md). | `entity.set_audio` |
 
 Values are refreshed from the world every frame except for the field you
 are typing in. Every commit is one entry in the History panel, so a drag

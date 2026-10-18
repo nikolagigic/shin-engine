@@ -14,6 +14,7 @@
 //!             color: (0.8, 0.1, 0.1, 1.0),
 //!             texture: "assets/checker.png",
 //!             script: "scripts/orbit.rhai",
+//!             audio: (source: "assets/sounds/blip.wav", spatial: true),
 //!             children: [
 //!                 (
 //!                     name: "hat",
@@ -28,11 +29,11 @@
 //!
 //! [`save`] writes and [`load`] reads that format. Optional fields
 //! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, `script`,
-//! `children`, and every
-//! transform part) may be left out, and are written without `Some(...)`.
-//! Unknown fields are an error naming the field. Meshes and textures
-//! (GE-025) are [`AssetSource`] strings, so a scene file is independent of
-//! runtime mesh and texture handles.
+//! `audio`, `children`, and every transform part) may be left out, and are
+//! written without `Some(...)`. Unknown fields are an error naming the
+//! field. Meshes, textures (GE-025), and sounds (GE-036) are
+//! [`AssetSource`] strings, so a scene file is independent of runtime
+//! handles.
 //!
 //! Hierarchy (GE-031): an entity's `children` are nested inside it, and a
 //! child's `transform` is local to its parent, as in the world. Roots are
@@ -57,6 +58,7 @@ use serde::{Deserialize, Serialize};
 pub use tools::register_tools;
 
 use crate::asset::{AssetSource, Assets};
+use crate::audio::AudioSource;
 use crate::ecs::{Entity, Name, Resources, World, child_map, parent_of, set_parent};
 use crate::math::{Camera, Projection, Quat, Transform, Vec3};
 use crate::render::{LightUniform, MeshHandle, MeshInstance, RenderState, TextureHandle};
@@ -124,7 +126,7 @@ pub struct LightDesc {
 }
 
 /// One entity.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntityDesc {
     /// The entity's [`Name`] component, if any.
@@ -149,10 +151,91 @@ pub struct EntityDesc {
     /// project directory; none for an unscripted entity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    /// The entity's [`AudioSource`] (GE-036); none for a silent entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioDesc>,
     /// Entities parented to this one (GE-031), whose transforms are local
     /// to it. Default empty, and left out of the file when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<EntityDesc>,
+}
+
+/// An [`AudioSource`] in file form. Every field but `source` has a default
+/// and is left out when it has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioDesc {
+    /// The sound, as an audio [`AssetSource`] string: an `.ogg` or `.wav`
+    /// path such as `assets/sounds/blip.wav`.
+    pub source: String,
+    /// Linear volume; default `1.0`.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub volume: f32,
+    /// Whether the sound repeats until stopped; default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub looping: bool,
+    /// Whether the volume falls off with the distance from the camera;
+    /// default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spatial: bool,
+    /// Whether the sound starts when play starts; default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub autoplay: bool,
+}
+
+impl Default for AudioDesc {
+    /// No source, full volume, one-shot, not spatial, no autoplay.
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            volume: 1.0,
+            looping: false,
+            spatial: false,
+            autoplay: false,
+        }
+    }
+}
+
+impl AudioDesc {
+    /// `audio` in file form.
+    pub fn from_source(audio: &AudioSource) -> Self {
+        Self {
+            source: audio.source.to_string(),
+            volume: audio.volume,
+            looping: audio.looping,
+            spatial: audio.spatial,
+            autoplay: audio.autoplay,
+        }
+    }
+
+    /// The component this describes. Fails if `source` does not parse as
+    /// an audio asset source.
+    pub fn to_source(&self) -> anyhow::Result<AudioSource> {
+        let source = AssetSource::parse(&self.source)?;
+        anyhow::ensure!(
+            source.is_audio(),
+            "{source} is not a sound source (.ogg or .wav)"
+        );
+        Ok(AudioSource {
+            source,
+            volume: self.volume,
+            looping: self.looping,
+            spatial: self.spatial,
+            autoplay: self.autoplay,
+        })
+    }
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn is_one(x: &f32) -> bool {
+    *x == 1.0
+}
+
+fn is_false(x: &bool) -> bool {
+    !*x
 }
 
 impl EntityDesc {
@@ -247,13 +330,14 @@ impl SceneFile {
     pub fn capture_with_ids(world: &World, res: &Resources) -> anyhow::Result<(Self, Vec<Entity>)> {
         let state = res.get::<RenderState>();
         let mut rows: HashMap<Entity, EntityDesc> = HashMap::new();
-        for (entity, transform, instance, name, script) in world
+        for (entity, transform, instance, name, script, audio) in world
             .query::<(
                 Entity,
                 &Transform,
                 Option<&MeshInstance>,
                 Option<&Name>,
                 Option<&Script>,
+                Option<&AudioSource>,
             )>()
             .iter()
         {
@@ -297,6 +381,7 @@ impl SceneFile {
                 color,
                 texture,
                 script: script.map(|s| s.path.to_string_lossy().into_owned()),
+                audio: audio.map(AudioDesc::from_source),
                 children: Vec::new(),
             };
             rows.insert(entity, desc);
@@ -406,12 +491,12 @@ pub fn save(world: &World, res: &Resources, path: &Path) -> anyhow::Result<()> {
 ///
 /// Meshes and textures are resolved through the [`Assets`] resource
 /// (relative file sources against its root) and uploaded into the
-/// [`RenderState`] registries (`queue` uploads texture pixels).
-/// Everything is parsed, validated, and resolved before the world is
-/// cleared, so a failed load leaves the world untouched. Fails on a parse
-/// error, an unknown field (named), an unsupported version, an invalid
-/// camera or light, or a mesh or texture source that does not resolve (the
-/// error names the source).
+/// [`RenderState`] registries (`queue` uploads texture pixels); sounds are
+/// decoded into the same cache. Everything is parsed, validated, and
+/// resolved before the world is cleared, so a failed load leaves the world
+/// untouched. Fails on a parse error, an unknown field (named), an
+/// unsupported version, an invalid camera or light, or a mesh, texture, or
+/// sound source that does not resolve (the error names the source).
 pub fn load(
     world: &mut World,
     res: &mut Resources,
@@ -460,11 +545,15 @@ pub fn apply_entities(
     }
     let flat = flatten(&scene.entities);
     let resolved = resolve_assets(res, device, queue, &flat)?;
+    let sounds = resolve_sounds(res, &flat)?;
 
     world.clear();
     let mut spawned: Vec<Entity> = Vec::with_capacity(flat.len());
-    for ((desc, parent), assets) in flat.iter().zip(resolved) {
+    for (((desc, parent), assets), audio) in flat.iter().zip(resolved).zip(sounds) {
         let entity = world.spawn((desc.transform.to_transform(),));
+        if let Some(audio) = audio {
+            world.insert_one(entity, audio)?;
+        }
         if let Some((mesh, texture)) = assets {
             let color = desc.color.unwrap_or([1.0; 4]);
             let instance = MeshInstance {
@@ -553,6 +642,36 @@ fn resolve_assets(
     })();
     res.insert(assets);
     result
+}
+
+/// The [`AudioSource`] of every entity that has an `audio` field, in
+/// order, decoding each sound into the [`Assets`] cache so a missing or
+/// unreadable file is reported here, before the world is touched.
+/// `entities` is the flattened scene; the index in an error is the
+/// position there (depth first).
+fn resolve_sounds(
+    res: &mut Resources,
+    entities: &[(&EntityDesc, Option<usize>)],
+) -> anyhow::Result<Vec<Option<AudioSource>>> {
+    let assets = res.get_mut::<Assets>().context("no Assets resource")?;
+    entities
+        .iter()
+        .enumerate()
+        .map(|(i, (desc, _))| {
+            desc.audio
+                .as_ref()
+                .map(|audio| -> anyhow::Result<AudioSource> {
+                    let source = audio.to_source()?;
+                    assets.sound(&source.source)?;
+                    Ok(source)
+                })
+                .transpose()
+                .with_context(|| {
+                    let text = desc.audio.as_ref().map_or("", |a| a.source.as_str());
+                    format!("entity {i}: sound {text:?} could not be loaded")
+                })
+        })
+        .collect()
 }
 
 fn validate_camera(desc: &CameraDesc) -> anyhow::Result<()> {

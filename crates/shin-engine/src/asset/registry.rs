@@ -12,8 +12,10 @@
 //! | `assets/x.gltf#2`       | [`AssetSource::File`] with `index: 2`         |
 //! | `assets/x.png`          | [`AssetSource::Image`] (also `.jpg`, `.jpeg`) |
 //! | `assets/x.gltf#image=1` | [`AssetSource::GltfImage`] with `index: 1`    |
+//! | `assets/x.ogg`          | [`AssetSource::Audio`] (also `.wav`)          |
 //!
-//! The first three are meshes, the last two textures.
+//! The first three are meshes, the next two textures, and the last a sound
+//! (GE-036, decoded by [`Assets::sound`]).
 //!
 //! Built-in names are `cube` ([`super::cube`]), `sphere`
 //! ([`super::uv_sphere`] with 32 segments and 16 rings), and
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::Context as _;
+use kira::sound::static_sound::StaticSoundData;
 use serde::{Deserialize, Serialize};
 
 use super::{ImageData, MeshData};
@@ -38,6 +41,9 @@ const GLTF_IMAGE_FRAGMENT: &str = "image=";
 
 /// File extensions (lowercase) that make a path an [`AssetSource::Image`].
 const IMAGE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
+
+/// File extensions (lowercase) that make a path an [`AssetSource::Audio`].
+const AUDIO_EXTENSIONS: [&str; 2] = ["ogg", "wav"];
 
 /// Segments and rings of the plain `sphere` built-in.
 const DEFAULT_SPHERE: (u32, u32) = (32, 16);
@@ -76,12 +82,20 @@ pub enum AssetSource {
         /// Index into the file's images ([`super::SceneData::images`]).
         index: usize,
     },
+    /// A sound: an Ogg Vorbis or WAV file (GE-036). The path must end in
+    /// `.ogg` or `.wav` (any case) for the string form to parse back to
+    /// this.
+    Audio {
+        /// Path to the sound file; relative paths are resolved against
+        /// [`Assets`]' root.
+        path: PathBuf,
+    },
 }
 
 impl AssetSource {
     /// Parses the string form: `builtin://<name>`, `<path>`,
     /// `<path>#<index>`, an image path ending in `.png`, `.jpg`, or `.jpeg`,
-    /// or `<path>#image=<index>`.
+    /// `<path>#image=<index>`, or a sound path ending in `.ogg` or `.wav`.
     ///
     /// Only the syntax is checked; whether the built-in exists or the file
     /// loads is checked by [`Assets::mesh`] and [`Assets::texture`]. Fails
@@ -105,8 +119,13 @@ impl AssetSource {
             !s.contains("://"),
             "invalid asset source {s:?}: only builtin:// and file paths are supported"
         );
-        if has_image_extension(Path::new(s)) {
+        if has_extension(Path::new(s), &IMAGE_EXTENSIONS) {
             return Ok(Self::Image {
+                path: PathBuf::from(s),
+            });
+        }
+        if has_extension(Path::new(s), &AUDIO_EXTENSIONS) {
+            return Ok(Self::Audio {
                 path: PathBuf::from(s),
             });
         }
@@ -144,13 +163,19 @@ impl AssetSource {
     pub fn is_texture(&self) -> bool {
         matches!(self, Self::Image { .. } | Self::GltfImage { .. })
     }
+
+    /// Whether this names a sound ([`Self::Audio`]) rather than a mesh or
+    /// a texture.
+    pub fn is_audio(&self) -> bool {
+        matches!(self, Self::Audio { .. })
+    }
 }
 
-/// Whether `path` ends in one of [`IMAGE_EXTENSIONS`], ignoring case.
-fn has_image_extension(path: &Path) -> bool {
+/// Whether `path` ends in one of `extensions` (lowercase), ignoring case.
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 impl fmt::Display for AssetSource {
@@ -168,7 +193,7 @@ impl fmt::Display for AssetSource {
                     write!(f, "{path}#{index}")
                 }
             }
-            Self::Image { path } => write!(f, "{}", path.display()),
+            Self::Image { path } | Self::Audio { path } => write!(f, "{}", path.display()),
             Self::GltfImage { path, index } => {
                 write!(f, "{}#{GLTF_IMAGE_FRAGMENT}{index}", path.display())
             }
@@ -184,8 +209,8 @@ impl FromStr for AssetSource {
     }
 }
 
-/// Resource: resolves [`AssetSource`]s to GPU meshes and textures, caching
-/// by source so each source is loaded and uploaded once.
+/// Resource: resolves [`AssetSource`]s to GPU meshes and textures, and to
+/// decoded sounds, caching by source so each source is loaded once.
 pub struct Assets {
     /// Directory relative file sources are resolved against.
     root: PathBuf,
@@ -193,6 +218,9 @@ pub struct Assets {
     meshes: HashMap<AssetSource, MeshHandle>,
     /// Every texture source uploaded so far.
     textures: HashMap<AssetSource, TextureHandle>,
+    /// Every sound decoded so far (GE-036). A [`StaticSoundData`] shares
+    /// its samples between clones, so handing out copies is cheap.
+    sounds: HashMap<AssetSource, StaticSoundData>,
 }
 
 impl Assets {
@@ -203,7 +231,30 @@ impl Assets {
             root,
             meshes: HashMap::new(),
             textures: HashMap::new(),
+            sounds: HashMap::new(),
         }
+    }
+
+    /// The decoded samples of `source`, reading and decoding the file on
+    /// first use. Later calls with an equal source return a clone sharing
+    /// the same samples without touching the disk.
+    ///
+    /// Fails if `source` is not an [`AssetSource::Audio`] or the file
+    /// cannot be read or decoded (only mono and stereo Ogg Vorbis and WAV
+    /// are supported).
+    pub fn sound(&mut self, source: &AssetSource) -> anyhow::Result<StaticSoundData> {
+        if let Some(sound) = self.sounds.get(source) {
+            return Ok(sound.clone());
+        }
+        let AssetSource::Audio { path } = source else {
+            anyhow::bail!("{source} is not a sound source (.ogg or .wav)");
+        };
+        let file = self.resolve(path);
+        let sound = StaticSoundData::from_file(&file)
+            .map_err(|err| anyhow::anyhow!("{err}"))
+            .with_context(|| format!("failed to load sound {}", file.display()))?;
+        self.sounds.insert(source.clone(), sound.clone());
+        Ok(sound)
     }
 
     /// The directory relative file sources are resolved against.
@@ -242,6 +293,9 @@ impl Assets {
             AssetSource::Image { .. } | AssetSource::GltfImage { .. } => {
                 anyhow::bail!("{source} is a texture source, not a mesh")
             }
+            AssetSource::Audio { .. } => {
+                anyhow::bail!("{source} is a sound source, not a mesh")
+            }
         };
         Ok(self.insert(device, registry, source, &data))
     }
@@ -276,6 +330,9 @@ impl Assets {
             }
             AssetSource::Builtin(_) | AssetSource::File { .. } => {
                 anyhow::bail!("{source} is a mesh source, not a texture")
+            }
+            AssetSource::Audio { .. } => {
+                anyhow::bail!("{source} is a sound source, not a texture")
             }
         };
         self.insert_texture(device, queue, textures, source, &image)
@@ -509,6 +566,10 @@ mod tests {
         );
         // Not an image extension: still a mesh.
         assert_eq!(AssetSource::parse("x.png#1")?, file("x.png", 1));
+        // Sounds (GE-036) are neither.
+        let blip = AssetSource::parse("assets/sounds/blip.wav")?;
+        assert!(blip.is_audio() && !blip.is_texture(), "{blip}");
+        assert_eq!(blip.to_string(), "assets/sounds/blip.wav");
         for s in [
             "assets/c.png",
             "odd#name.jpeg",
