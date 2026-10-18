@@ -29,5 +29,6 @@ schemars = { workspace = true }
 toml = { workspace = true }
 ron = { workspace = true }
 rhai = { workspace = true }
+gilrs = { workspace = true }
 
 [dev-dependencies]

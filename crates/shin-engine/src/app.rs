@@ -23,7 +23,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::ecs::{self, ExitRequest, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
-use crate::input::InputState;
+use crate::input::{Actions, GamepadState, Gamepads, InputState, actions_system};
 use crate::stats::{FrameStats, frame_stats_system};
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
@@ -152,7 +152,12 @@ pub type RenderFn =
 ///
 /// It also owns input: an [`InputState`] resource receives every window and
 /// device event, is reset with [`InputState::end_frame`] after the frame
-/// systems, and its `cursor_grabbed` flag drives the window cursor.
+/// systems, and its `cursor_grabbed` flag drives the window cursor. Gamepads
+/// (gilrs, started in [`Game::init`]) are polled into a [`GamepadState`]
+/// resource at the start of every frame, and [`actions_system`] then
+/// derives the [`Actions`] resource (empty until the game inserts its
+/// project's, see [`Actions::from_config`]) before the schedule's frame
+/// systems run. Each fixed step ends with [`Actions::end_step`].
 ///
 /// Frame times go into a [`FrameStats`] resource: [`frame_stats_system`]
 /// runs after every frame system in the schedule, and once per second the
@@ -173,6 +178,9 @@ pub struct EcsGame {
     /// per second. Empty by default, which shows the summary alone; set it
     /// to [`AppConfig::title`] to keep the name visible.
     pub title: String,
+    /// The gamepads, polled every frame; started by [`Game::init`] so
+    /// building a game touches no devices.
+    gamepads: Gamepads,
     last_frame: Option<Instant>,
     /// Frame time accumulated since the window title was last rebuilt.
     title_age: f64,
@@ -189,12 +197,15 @@ impl Default for EcsGame {
 
 impl EcsGame {
     /// A game over `world` driven by `schedule`, with default [`Time`],
-    /// [`InputState`] and [`FrameStats`] resources, `ExitRequest(false)`,
-    /// and no render callback.
+    /// [`InputState`], [`GamepadState`], [`Actions`] (none defined) and
+    /// [`FrameStats`] resources, `ExitRequest(false)`, and no render
+    /// callback.
     pub fn new(world: World, schedule: Schedule) -> Self {
         let mut resources = Resources::new();
         resources.insert(Time::default());
         resources.insert(InputState::default());
+        resources.insert(GamepadState::default());
+        resources.insert(Actions::new());
         resources.insert(FrameStats::default());
         resources.insert(ExitRequest(false));
         Self {
@@ -203,6 +214,7 @@ impl EcsGame {
             schedule,
             render_fn: None,
             title: String::new(),
+            gamepads: Gamepads::default(),
             last_frame: None,
             title_age: 0.0,
             stats_title: None,
@@ -219,7 +231,8 @@ impl EcsGame {
     }
 
     /// The GPU-independent half of [`Game::render`]: updates `frame_dt`
-    /// and `alpha` in [`Time`], runs the frame systems and then
+    /// and `alpha` in [`Time`], polls the gamepads and derives the
+    /// [`Actions`] ([`actions_system`]), runs the frame systems and then
     /// [`frame_stats_system`], ends the input frame, and rebuilds the
     /// window title if a second has passed since the last rebuild.
     fn begin_frame(&mut self, alpha: f64) {
@@ -232,6 +245,12 @@ impl EcsGame {
         let time = self.time_mut();
         time.frame_dt = frame_dt;
         time.alpha = alpha;
+        if let Some(gamepads) = self.resources.get_mut::<GamepadState>() {
+            self.gamepads.poll(gamepads);
+        }
+        // Before the schedule, so every frame system sees this frame's
+        // actions.
+        actions_system(&mut self.world, &mut self.resources);
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
         // Run directly rather than via the schedule so it stays last even
@@ -239,6 +258,9 @@ impl EcsGame {
         frame_stats_system(&mut self.world, &mut self.resources);
         if let Some(input) = self.resources.get_mut::<InputState>() {
             input.end_frame();
+        }
+        if let Some(gamepads) = self.resources.get_mut::<GamepadState>() {
+            gamepads.end_frame();
         }
 
         self.title_age += frame_dt;
@@ -258,8 +280,17 @@ impl EcsGame {
 }
 
 impl Game for EcsGame {
+    /// Starts the gamepads ([`Gamepads::new`]).
+    fn init(&mut self, _ctx: &GpuContext) -> anyhow::Result<()> {
+        self.gamepads = Gamepads::new();
+        Ok(())
+    }
+
     fn fixed_update(&mut self, dt: f64) {
         ecs::fixed_step(&mut self.world, &mut self.resources, &mut self.schedule, dt);
+        if let Some(actions) = self.resources.get_mut::<Actions>() {
+            actions.end_step();
+        }
     }
 
     fn render(
