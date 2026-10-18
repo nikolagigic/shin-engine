@@ -5,9 +5,10 @@
 //! ```
 //!
 //! Opens the project in `<project-dir>` (its `shin.toml` names the window)
-//! with docked Viewport, Scene, Inspector, and Log panels. In the viewport,
-//! left-drag orbits, right-drag pans, and the wheel zooms. The toolbar's
-//! Play runs the simulation and Stop puts the scene back.
+//! with docked Viewport, Scene, Assets, Inspector, History, Log, and
+//! Console panels. In the viewport, left-drag orbits, right-drag pans, and
+//! the wheel zooms. The toolbar's Play runs the simulation and Stop puts
+//! the scene back.
 //!
 //! `--screenshot <png>` renders one full editor frame without a window,
 //! writes it to `<png>`, and exits; tests use it.
@@ -16,6 +17,7 @@
 //! `moon` around the origin while playing, as the starter game does, since
 //! the editor does not run the game's own systems yet.
 
+mod assets;
 mod edit;
 mod editor;
 mod inspector;

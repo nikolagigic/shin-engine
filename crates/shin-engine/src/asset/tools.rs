@@ -2,6 +2,7 @@
 //! and `mesh.builtin`. All three resolve [`AssetSource`]s through the
 //! [`Assets`] resource, which uploads each source once into the renderer's
 //! [`crate::render::MeshRegistry`] or [`crate::render::TextureRegistry`].
+//! `asset.list` (GE-032, in [`super::scan`]) lists the project's assets.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,7 +19,8 @@ use crate::headless::Headless;
 use crate::render::{MeshInstance, RenderState};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
-/// Registers `asset.load`, `scene.load_gltf`, and `mesh.builtin`.
+/// Registers `asset.load`, `asset.list`, `scene.load_gltf`, and
+/// `mesh.builtin`.
 pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "asset.load",
@@ -27,6 +29,16 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          {\"texture\": n}; pass them to entity.spawn as `mesh` and `texture`. Loading \
          the same source again returns the same handle.",
         asset_load,
+    ));
+    reg.register(TypedTool::new(
+        "asset.list",
+        "Lists what the open project contains, from its assets/, scenes/, and scripts/ \
+         directories: one entry per glTF triangle primitive (kind \"mesh\"), per image \
+         file or glTF image (\"texture\"), per .scene.ron file (\"scene\"), and per .rhai \
+         file (\"script\"), each with the `source` string the matching tool takes \
+         (asset.load, entity.set_mesh, entity.set_texture, scene.load, script.attach) \
+         and the file's path relative to the project.",
+        super::scan::asset_list,
     ));
     reg.register(TypedTool::new(
         "scene.load_gltf",

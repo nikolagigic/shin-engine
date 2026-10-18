@@ -50,6 +50,9 @@ pub enum Edit {
     },
     /// `entity.set_mesh` with an asset source string.
     Mesh(Entity, String),
+    /// `entity.set_texture` with a texture asset source string, or `None`
+    /// to remove the texture (GE-032, from the Assets panel).
+    Texture(Entity, Option<String>),
     /// `script.attach` with a `.rhai` path; empty removes the script.
     Script(Entity, String),
 }

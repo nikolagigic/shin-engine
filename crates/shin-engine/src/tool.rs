@@ -294,7 +294,7 @@ impl ToolRegistry {
     }
 
     /// [`Self::with_builtins`] plus every subsystem's tools: assets
-    /// (`scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
+    /// (`asset.load`, `asset.list`, `scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
     /// `sim.step`), render (`mesh.list`, `camera.set`, `light.set`,
     /// `render.frame`), stats (`stats.summary`), projects
     /// (`project.new`), and scene files (`scene.save`, `scene.load`). This

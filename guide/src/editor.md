@@ -20,12 +20,13 @@ editor, for example `shin edit mygame -- --screenshot out.png`.
 
 ## Panels and the View menu
 
-The window opens at 1600 × 900 with six docked panels:
+The window opens at 1600 × 900 with seven docked panels:
 
 | Panel         | Where      | Shows |
 |---------------|------------|-------|
 | **Viewport**  | centre     | The scene, rendered live from the editor's orbit camera (from the scene's own camera while playing). The selected entity is drawn with its colour mixed halfway toward white. |
-| **Scene**     | left       | Every entity that has a transform, in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
+| **Scene**     | left, top  | Every entity that has a transform, in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
+| **Assets**    | left, bottom | The project's meshes, textures, scenes, and scripts, with a button per entry to use it, and an Import row. |
 | **Inspector** | right, top | The selected entity's properties, editable, and the scene camera. |
 | **History**   | right, bottom | The command history: undoable edits oldest first as `tool {args}`, then undone edits greyed out. |
 | **Log**       | bottom, left | The engine's log lines, newest at the bottom. |
@@ -117,6 +118,54 @@ entity) and spawns with one recorded `entity.spawn`; deleting is one
 recorded `entity.despawn`. Undoing a delete brings the entity back under
 the same id.
 
+## The Assets panel
+
+The Assets panel lists what the project directory contains, so you can
+use a file without typing its asset source. It scans three directories,
+including subdirectories:
+
+| Directory  | Files                        | Entries |
+|------------|------------------------------|---------|
+| `assets/`  | `.gltf`, `.glb`              | One **mesh** per triangle primitive (`assets/x.gltf`, `assets/x.gltf#1`, ...) and one **texture** per image (`assets/x.gltf#image=0`). |
+| `assets/`  | `.png`, `.jpg`, `.jpeg`      | One **texture**. |
+| `scenes/`  | `.scene.ron`                 | One **scene**. |
+| `scripts/` | `.rhai`                      | One **script**. |
+
+Other files (a glTF's `.bin` buffer, `src/`, `target/`) are not listed; a
+glTF that does not parse is skipped with a warning in the Log. Entries
+are grouped by kind under collapsible headings and labelled by their
+[asset source](scenes.md#asset-sources) or path; hovering shows the file.
+The **Filter** box narrows the list to entries whose source or path
+contains the text, ignoring case.
+
+Each entry has buttons for what it can do. Those that need a selected
+entity are greyed out without one, and all of them are disabled while
+playing:
+
+| Kind    | Button     | Does | Tool call recorded |
+|---------|------------|------|--------------------|
+| mesh    | **Spawn**  | Adds an entity drawing the mesh at the orbit camera's target, named after the file, and selects it (like **+ From asset**). | `entity.spawn` |
+| mesh    | **Assign** | Makes the selected entity draw this mesh; colour and texture are kept. | `entity.set_mesh` |
+| texture | **Assign** | Gives the selected entity this base-colour texture (it must draw a mesh). | `entity.set_texture` |
+| script  | **Attach** | Attaches the script to the selected entity, replacing any it had. | `script.attach` |
+| scene   | **Open**   | Replaces every entity with the scene file's, clears the history and selection, and makes the file the one **Save** writes, like File > Open. | `scene.load` (not recorded) |
+
+Every recorded call is one entry in the History panel, so Ctrl+Z undoes
+it. To remove a texture, run `entity.set_texture {"entity": <id>,
+"source": null}` in the Console.
+
+**Import…** copies a file into the project's `assets/` directory: type an
+absolute path into the field next to the button and press it (or Enter).
+The file keeps its name, nothing is overwritten (importing a name that
+already exists fails), and the panel lists the new file at once. There
+is no file dialog; paste the path from your file manager.
+
+The panel rescans the project when it is opened from the View menu and,
+while it is shown, checks every 2 seconds whether anything under the
+three directories was added, removed, or modified, rescanning only then.
+So a file you copy into `assets/` by hand appears within 2 seconds.
+Agents see the same list through the `asset.list` tool.
+
 ## Undo, redo, and the History panel
 
 - **Ctrl+Z** (Cmd+Z on macOS) undoes, **Ctrl+Shift+Z** (Cmd+Shift+Z)
@@ -130,8 +179,8 @@ the same id.
   bring back, greyed out. It is read-only.
 
 Only recorded tool calls appear: edits from the Inspector, the Scene
-panel, and the Console. Queries, renders, asset loads, and `sim.step`
-run without being recorded.
+panel, the Assets panel, and the Console. Queries, renders, asset loads,
+and `sim.step` run without being recorded.
 
 ## The Console
 
@@ -162,7 +211,8 @@ The **File** menu works with scene files relative to the project:
 
 - **Open** loads the project's entry scene (or `scenes/main.scene.ron`
   when `shin.toml` names none) with `scene.load`, replacing every entity
-  and clearing the history and selection.
+  and clearing the history and selection. Any other scene file in
+  `scenes/` opens the same way from the [Assets panel](#the-assets-panel).
 - **Save** writes the scene to the current scene path with `scene.save`.
   Hovering the item shows the path. At first it is the entry scene.
 - **Save As** takes a project-relative path ending in `.scene.ron`
@@ -197,7 +247,8 @@ The toolbar at the end of the menu bar has **Play**, **Pause**,
   valid, and the clock is restored.
 
 While playing, editing is disabled: the Inspector is read-only (it still
-shows the live values), the Scene panel's add and delete controls, undo
+shows the live values), the Scene panel's add and delete controls, the
+Assets panel's buttons, undo
 and redo, the Delete key, and File > Open and Save are greyed out or
 ignored. Selecting still works. Console lines still run, but they are not
 recorded, since Stop discards whatever they changed, and `history.*`
