@@ -199,6 +199,7 @@ including subdirectories:
 |------------|------------------------------|---------|
 | `assets/`  | `.gltf`, `.glb`              | One **mesh** per triangle primitive (`assets/x.gltf`, `assets/x.gltf#1`, ...) and one **texture** per image (`assets/x.gltf#image=0`). |
 | `assets/`  | `.png`, `.jpg`, `.jpeg`      | One **texture**. |
+| `assets/`  | `.ogg`, `.wav`               | One **audio** entry, listed under **Sounds**. |
 | `scenes/`  | `.scene.ron`                 | One **scene**. |
 | `scripts/` | `.rhai`                      | One **script**. |
 
@@ -210,8 +211,8 @@ The **Filter** box narrows the list to entries whose source or path
 contains the text, ignoring case.
 
 Each entry has buttons for what it can do. Those that need a selected
-entity are greyed out without one, and all of them are disabled while
-playing:
+entity are greyed out without one, and those that change the scene are
+disabled while playing:
 
 | Kind    | Button     | Does | Tool call recorded |
 |---------|------------|------|--------------------|
@@ -219,6 +220,7 @@ playing:
 | mesh    | **Assign** | Makes the selected entity draw this mesh; colour and texture are kept. | `entity.set_mesh` |
 | texture | **Assign** | Gives the selected entity this base-colour texture (it must draw a mesh). | `entity.set_texture` |
 | script  | **Attach** | Attaches the script to the selected entity, replacing any it had. | `script.attach` |
+| audio   | **▶ Play** | Plays the sound once at full volume, as a preview. It changes nothing, so it works with no selection and while playing. See [Audio](audio.md). | `audio.play` (not recorded) |
 | scene   | **Open**   | Replaces every entity with the scene file's, clears the history and selection, and makes the file the one **Save** writes, like File > Open. | `scene.load` (not recorded) |
 
 Every recorded call is one entry in the History panel, so Ctrl+Z undoes

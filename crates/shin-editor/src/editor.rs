@@ -779,6 +779,7 @@ pub fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shin::audio::AudioEngine;
     use shin::math::{Projection, Vec2, Vec3};
     use shin::project::{self, NewProjectOptions};
     use shin::scene::TransformDesc;
@@ -1600,6 +1601,7 @@ mod tests {
                 "assets/crate.gltf",
                 "assets/crate.gltf#image=0",
                 "assets/cube.gltf",
+                "assets/sounds/blip.wav",
                 "scenes/main.scene.ron",
                 "scripts/lift.rhai",
                 "scripts/moon.rhai",
@@ -1607,6 +1609,20 @@ mod tests {
             ]
         );
         let starter = core.engine.world.len();
+
+        // Preview (GE-038): the sound entry's button plays it once and
+        // records nothing.
+        core.engine.resources.insert(AudioEngine::silent());
+        let plays = |core: &EditorCore| core.engine.resources.expect::<AudioEngine>().plays();
+        core.try_run(Action::PreviewSound("assets/sounds/blip.wav".to_string()))?;
+        assert_eq!(plays(&core), 1);
+        assert_eq!(
+            core.engine
+                .resources
+                .get::<History>()
+                .map_or(0, History::undo_len),
+            0
+        );
 
         // Spawn: the mesh entry's source, at the orbit target, selected.
         run_undo_redo(
@@ -1743,6 +1759,8 @@ mod tests {
             );
         }
         assert!(!Action::Import(String::new()).is_edit());
+        core.try_run(Action::PreviewSound("assets/sounds/blip.wav".to_string()))?;
+        assert_eq!(plays(&core), 2, "previews work while playing");
         core.try_run(Action::Stop)?;
 
         let _ = std::fs::remove_dir_all(&root);
