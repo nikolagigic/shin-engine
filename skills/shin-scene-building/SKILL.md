@@ -25,6 +25,9 @@ rendered frame, and save it to a scene file.
   applied in X, Y, Z order.
 - Colours are **linear** RGBA `[r, g, b, a]`, not sRGB. Pick darker
   values than you would in CSS: sRGB mid-grey `#808080` is linear 0.22.
+- `translation`, rotation, and scale are local to the entity's parent (a
+  root's parent is the world); `entity.list` also reports
+  `world_translation`.
 - Entity ids are large numbers (`4294967296`); always take them from
   `entity.spawn` or `entity.list`, never guess.
 
@@ -61,9 +64,12 @@ rendered frame, and save it to a scene file.
    ```
 
    Each returns `{"entity": <id>}`. Adjust later with
-   `entity.set_transform`, `entity.set_color`, `entity.set_name`, or
-   `entity.set_mesh` (which takes an asset source such as
-   `"builtin://sphere"`), and remove with `entity.despawn`.
+   `entity.set_transform`, `entity.set_color`, `entity.set_name`,
+   `entity.set_mesh` (an asset source such as `"builtin://sphere"`), or
+   `entity.set_texture` (an image source such as `"assets/checker.png"`),
+   and remove with `entity.despawn`. To group objects so they move
+   together, `entity.set_parent` with `{"entity": <child>, "parent": <id>}`;
+   the child stays where it is in the world by default.
 
 4. **Frame it.** `camera.set` with
    `{"position": [0, 3, 6], "look_at": [0, 0.5, 0], "fov_y_deg": 60}`.

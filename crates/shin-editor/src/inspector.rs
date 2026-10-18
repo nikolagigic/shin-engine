@@ -1,6 +1,12 @@
 //! The Inspector panel (GE-023): the selected entity's name, transform,
-//! mesh, and colour, editable; and (GE-011) its script path, with the
-//! script's last compile or runtime error.
+//! mesh, and colour, editable; (GE-011) its script path, with the
+//! script's last compile or runtime error; and (GE-030) the scene's own
+//! camera, read-only, with buttons to swap placements with the viewport's
+//! orbit camera ([`scene_camera_ui`]). GE-031: the transform rows are
+//! local to the entity's parent (shown read-only by name), followed by the
+//! read-only world transform. GE-036: the entity's sound: source, a Play
+//! button that previews it, volume, and the loop, spatial, and autoplay
+//! flags.
 //!
 //! The panel keeps its own copy of the values being edited, refreshed from
 //! the world every frame except for the field the user is working on.
@@ -12,11 +18,12 @@
 use std::path::Path;
 
 use egui::{DragValue, Ui};
-use shin::ecs::{Entity, Name};
+use shin::audio::AudioSource;
+use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::headless::Headless;
-use shin::math::Transform;
+use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::render::{MeshInstance, RenderState};
-use shin::scene::TransformDesc;
+use shin::scene::{AudioDesc, TransformDesc};
 use shin::script::{Script, ScriptEngine};
 
 use crate::edit::entity_id;
@@ -48,8 +55,13 @@ pub enum Edit {
     },
     /// `entity.set_mesh` with an asset source string.
     Mesh(Entity, String),
+    /// `entity.set_texture` with a texture asset source string, or `None`
+    /// to remove the texture (GE-032, from the Assets panel).
+    Texture(Entity, Option<String>),
     /// `script.attach` with a `.rhai` path; empty removes the script.
     Script(Entity, String),
+    /// `entity.set_audio` with the whole sound; `None` removes it (GE-036).
+    Audio(Entity, Option<AudioDesc>),
 }
 
 /// The Inspector's edit buffers.
@@ -63,6 +75,10 @@ pub struct Inspector {
     color: Option<[f32; 4]>,
     mesh: String,
     script: String,
+    /// The sound source field.
+    audio_source: String,
+    /// The volume drag value.
+    audio_volume: f32,
     /// The transform before the preview in progress, if any.
     transform_origin: Option<TransformDesc>,
     /// The colour before the preview in progress, if any.
@@ -73,18 +89,27 @@ pub struct Inspector {
     transform_focused: bool,
     mesh_focused: bool,
     script_focused: bool,
+    audio_source_focused: bool,
+    /// Whether the volume is being dragged or typed in.
+    audio_volume_editing: bool,
 }
 
 /// The values the inspector shows for `entity`, read from the world.
 struct Current {
     name: String,
     transform: Option<TransformDesc>,
+    /// The world-space transform (GE-031), shown read-only.
+    world: TransformDesc,
+    /// The parent's label (`name` or `#id`), if it has a parent.
+    parent: Option<String>,
     color: Option<[f32; 4]>,
     mesh: String,
     /// The script path, or empty.
     script: String,
     /// The script's last error, as `path:line: message`.
     script_error: Option<String>,
+    /// The entity's sound, if any.
+    audio: Option<AudioDesc>,
 }
 
 impl Current {
@@ -101,7 +126,14 @@ impl Current {
         let script_error = script
             .as_deref()
             .and_then(|path| script_error(engine, path));
+        let world_space = TransformDesc::from_transform(&world_transform(world, entity));
+        let parent = parent_of(world, entity).map(|parent| {
+            let name = world.get::<&Name>(parent).ok().map(|n| (*n).clone());
+            crate::ui::entity_label(parent, name.as_ref())
+        });
         Self {
+            world: world_space,
+            parent,
             script: script
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -116,7 +148,86 @@ impl Current {
                 .map(|t| TransformDesc::from_transform(&t)),
             color: instance.map(|i| i.color),
             mesh,
+            audio: world
+                .get::<&AudioSource>(entity)
+                .ok()
+                .map(|a| AudioDesc::from_source(&a)),
         }
+    }
+}
+
+/// The read-only world transform rows (GE-031): the editable rows above
+/// them are local to the parent.
+fn world_rows(ui: &mut Ui, world: &TransformDesc) {
+    let fmt = |v: [f32; 3]| format!("{:.3}  {:.3}  {:.3}", v[0], v[1], v[2]);
+    for (label, values) in [
+        ("World position", world.translation),
+        ("World rotation (°)", world.rotation_euler_deg),
+        ("World scale", world.scale),
+    ] {
+        ui.label(label)
+            .on_hover_text("Read-only: the transform above is local to the parent");
+        ui.weak(fmt(values));
+        ui.end_row();
+    }
+}
+
+/// The "Scene camera" section: the scene's own [`Camera`] (the one Save
+/// writes and Play renders from; the viewport otherwise shows the editor's
+/// orbit camera), read-only, with **View from scene camera**
+/// ([`Action::ViewFromSceneCamera`]) and **Set scene camera from view**
+/// ([`Action::SetSceneCameraFromView`]).
+pub fn scene_camera_ui(ui: &mut Ui, engine: &Headless, actions: &mut Vec<Action>) {
+    ui.strong("Scene camera");
+    let Some(camera) = engine.resources.get::<Camera>() else {
+        ui.weak("No camera");
+        return;
+    };
+    egui::Grid::new("scene_camera_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Position");
+            ui.label(vec3_text(camera.transform.translation));
+            ui.end_row();
+            ui.label("Looking");
+            ui.label(vec3_text(camera.transform.forward()));
+            ui.end_row();
+            ui.label("FOV");
+            ui.label(fov_text(&camera.projection));
+            ui.end_row();
+        });
+    if ui
+        .button("View from scene camera")
+        .on_hover_text("Move the viewport camera to where the scene camera is")
+        .clicked()
+    {
+        actions.push(Action::ViewFromSceneCamera);
+    }
+    if ui
+        .button("Set scene camera from view")
+        .on_hover_text(
+            "Move the scene camera to the viewport camera (undoable; the scene is changed)",
+        )
+        .clicked()
+    {
+        actions.push(Action::SetSceneCameraFromView);
+    }
+}
+
+/// `v` with two decimals, as `(x, y, z)`.
+fn vec3_text(v: Vec3) -> String {
+    format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z)
+}
+
+/// A perspective projection's vertical field of view in degrees, or
+/// `orthographic`.
+fn fov_text(projection: &Projection) -> String {
+    match projection {
+        Projection::Perspective { fov_y_radians, .. } => {
+            format!("{:.1}°", fov_y_radians.to_degrees())
+        }
+        Projection::Orthographic { .. } => "orthographic".to_string(),
     }
 }
 
@@ -184,10 +295,15 @@ impl Inspector {
             .striped(true)
             .show(ui, |ui| {
                 self.name_row(ui, entity, actions);
+                ui.label("Parent");
+                ui.label(current.parent.as_deref().unwrap_or("(none)"));
+                ui.end_row();
                 self.transform_rows(ui, entity, actions);
+                world_rows(ui, &current.world);
                 self.mesh_row(ui, engine, entity, actions);
                 self.color_row(ui, entity, actions);
                 self.script_row(ui, entity, &current, actions);
+                self.audio_rows(ui, entity, &current, actions);
             });
         if let Some(error) = &current.script_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -221,6 +337,97 @@ impl Inspector {
         if !self.script_focused {
             self.script.clone_from(&current.script);
         }
+        if !self.audio_source_focused {
+            self.audio_source = current
+                .audio
+                .as_ref()
+                .map(|a| a.source.clone())
+                .unwrap_or_default();
+        }
+        if !self.audio_volume_editing {
+            self.audio_volume = current.audio.as_ref().map_or(1.0, |a| a.volume);
+        }
+    }
+
+    /// The Audio rows (GE-036): the sound's source with a Play button that
+    /// previews it, then, for an entity that has a sound, its volume and
+    /// the Loop, Spatial, and Autoplay flags. The source commits on Enter
+    /// or when it loses focus (empty removes the sound), the volume when
+    /// the drag ends, and each flag when clicked.
+    fn audio_rows(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        current: &Current,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.label("Audio");
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.audio_source)
+                    .hint_text("assets/sounds/x.wav")
+                    .desired_width(130.0),
+            );
+            let source = self.audio_source.trim().to_string();
+            let current_source = current.audio.as_ref().map_or("", |a| a.source.as_str());
+            if response.lost_focus() && source != current_source {
+                let audio = (!source.is_empty()).then(|| AudioDesc {
+                    source: source.clone(),
+                    ..current.audio.clone().unwrap_or_default()
+                });
+                actions.push(Action::Edit(Edit::Audio(entity, audio)));
+            }
+            self.audio_source_focused = response.has_focus();
+            let play = ui
+                .add_enabled(!source.is_empty(), egui::Button::new("▶ Play"))
+                .on_hover_text("Preview the sound");
+            if play.clicked() {
+                actions.push(Action::PreviewSound(source));
+            }
+        });
+        ui.end_row();
+
+        let Some(audio) = &current.audio else {
+            return;
+        };
+        ui.label("Volume");
+        let response = ui.add(
+            DragValue::new(&mut self.audio_volume)
+                .speed(0.01)
+                .range(0.0..=4.0)
+                .max_decimals(2)
+                .update_while_editing(false),
+        );
+        self.audio_volume_editing = response.dragged() || response.has_focus();
+        let finished = response.drag_stopped() || response.lost_focus();
+        if finished && self.audio_volume != audio.volume {
+            actions.push(Action::Edit(Edit::Audio(
+                entity,
+                Some(AudioDesc {
+                    volume: self.audio_volume,
+                    ..audio.clone()
+                }),
+            )));
+        }
+        ui.end_row();
+
+        ui.label("");
+        ui.horizontal(|ui| {
+            let mut flags = audio.clone();
+            let mut changed = ui.checkbox(&mut flags.looping, "Loop").changed();
+            changed |= ui
+                .checkbox(&mut flags.spatial, "Spatial")
+                .on_hover_text("Fade with the distance from the camera")
+                .changed();
+            changed |= ui
+                .checkbox(&mut flags.autoplay, "Autoplay")
+                .on_hover_text("Start when Play is pressed")
+                .changed();
+            if changed {
+                actions.push(Action::Edit(Edit::Audio(entity, Some(flags))));
+            }
+        });
+        ui.end_row();
     }
 
     /// The script path field: commits on Enter or when it loses focus, if
@@ -371,5 +578,26 @@ impl Inspector {
             }
         }
         ui.end_row();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_camera_text() {
+        assert_eq!(
+            vec3_text(Vec3::new(0.0, 2.0, -5.004)),
+            "(0.00, 2.00, -5.00)"
+        );
+        assert_eq!(
+            fov_text(&Projection::Perspective {
+                fov_y_radians: 60f32.to_radians(),
+                near: 0.1,
+                far: 100.0,
+            }),
+            "60.0°"
+        );
     }
 }

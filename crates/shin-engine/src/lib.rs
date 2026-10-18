@@ -10,7 +10,7 @@
 //! - [`ecs`]    — hecs `World` wrapper, systems schedule, `Time`  (GE-004)
 //! - [`asset`]  — glTF + texture loading into CPU-side structs    (GE-005)
 //! - [`render`] — mesh upload, materials, shaders, instancing     (GE-006, GE-008)
-//! - [`input`]  — keyboard/mouse state, camera controller         (GE-007)
+//! - [`input`]  — keyboard/mouse state, camera controller, actions (GE-007, GE-033)
 //! - [`stats`]  — frame-time statistics                           (GE-009)
 //! - [`tool`]   — engine-native tool registry (what MCP exposes)  (GE-013)
 //! - [`headless`] — window-less engine handle for tools and tests (GE-013)
@@ -18,6 +18,7 @@
 //! - [`scene`]  — `.scene.ron` scene files, `scene.save`/`scene.load` (GE-021)
 //! - [`command`] — undo/redo history over tool calls, `history.*` (GE-022)
 //! - [`script`] — Rhai gameplay scripts, `script.*`             (GE-011)
+//! - [`audio`]  — sound sources and one-shot playback, `audio.*` (GE-036)
 //!
 //! The MCP server lives in the separate `shin-mcp` crate (GE-014) and is
 //! a thin transport over `tool::ToolRegistry` (GE-013). The engine lib never
@@ -27,6 +28,7 @@
 
 pub mod app;
 pub mod asset;
+pub mod audio;
 pub mod command;
 pub mod ecs;
 pub mod gpu;

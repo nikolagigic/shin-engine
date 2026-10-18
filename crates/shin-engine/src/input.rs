@@ -8,12 +8,26 @@
 //! [`fly_camera_system`] is a frame system: WASD (plus E/Q for up/down) moves
 //! the [`Camera`] resource, and holding the right mouse button grabs the
 //! cursor and turns mouse motion into yaw and pitch.
+//!
+//! Named actions (GE-033) live in [`actions`]: [`Actions`] is the resource
+//! games and scripts read by action name (`jump`, `move_x`), bound in
+//! `shin.toml` to keys, mouse buttons, and gamepads ([`GamepadState`],
+//! fed by gilrs through [`Gamepads`]); [`actions_system`] derives it each
+//! frame. Tools: [`register_tools`] adds `input.list` and `input.set`.
+
+pub mod actions;
+mod tools;
 
 use std::collections::HashSet;
 
 use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::keyboard::PhysicalKey;
 
+pub use actions::{
+    ActionBinding, ActionValue, Actions, Binding, GamepadAxis, GamepadButton, GamepadState,
+    Gamepads, InputConfig, actions_system,
+};
+pub use tools::register_tools;
 pub use winit::keyboard::KeyCode;
 
 use crate::ecs::{Resources, Time, World};

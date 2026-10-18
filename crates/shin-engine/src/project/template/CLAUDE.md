@@ -29,9 +29,10 @@ Skills for common tasks are in `.claude/skills/`: `shin-scene-building`,
 - `shin.toml`: project name, window title and size, `entry_scene`.
 - `scenes/`: `.scene.ron` files; `scenes/main.scene.ron` loads on start.
 - `scripts/`: Rhai scripts (`fn update(entity, dt)`), attached to
-  entities with `script.attach`; they hot-reload while playing.
-- `assets/`: glTF meshes and PNG/JPEG textures. Paths in scenes and tools
-  are relative to the project root.
+  entities with `script.attach`; they hot-reload while playing. The cube
+  runs `player.rhai` and the moon `moon.rhai`.
+- `assets/`: glTF meshes, PNG/JPEG textures, and sounds (`sounds/`).
+  Paths in scenes and tools are relative to the project root.
 - `src/main.rs`: systems (`game_schedule`) and game tools
   (`register_game_tools`).
 

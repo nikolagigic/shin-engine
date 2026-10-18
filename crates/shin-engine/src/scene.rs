@@ -14,17 +14,31 @@
 //!             color: (0.8, 0.1, 0.1, 1.0),
 //!             texture: "assets/checker.png",
 //!             script: "scripts/orbit.rhai",
+//!             audio: (source: "assets/sounds/blip.wav", spatial: true),
+//!             children: [
+//!                 (
+//!                     name: "hat",
+//!                     transform: (translation: (0.0, 0.6, 0.0)),
+//!                     mesh: "builtin://sphere",
+//!                 ),
+//!             ],
 //!         ),
 //!     ],
 //! )
 //! ```
 //!
 //! [`save`] writes and [`load`] reads that format. Optional fields
-//! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, `script`, and every
-//! transform part) may be left out, and are written without `Some(...)`.
-//! Unknown fields are an error naming the field. Meshes and textures
-//! (GE-025) are [`AssetSource`] strings, so a scene file is independent of
-//! runtime mesh and texture handles.
+//! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, `script`,
+//! `audio`, `children`, and every transform part) may be left out, and are
+//! written without `Some(...)`. Unknown fields are an error naming the
+//! field. Meshes, textures (GE-025), and sounds (GE-036) are
+//! [`AssetSource`] strings, so a scene file is independent of runtime
+//! handles.
+//!
+//! Hierarchy (GE-031): an entity's `children` are nested inside it, and a
+//! child's `transform` is local to its parent, as in the world. Roots are
+//! written in entity id order and each child list in id order; loading
+//! spawns depth first in that order.
 //!
 //! Angles (`rotation_euler_deg`, `fov_y_deg`) and `look_at` are derived from
 //! the engine's quaternions and radians, so [`save`] rounds them to four
@@ -34,6 +48,7 @@
 
 mod tools;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -43,7 +58,8 @@ use serde::{Deserialize, Serialize};
 pub use tools::register_tools;
 
 use crate::asset::{AssetSource, Assets};
-use crate::ecs::{Entity, Name, Resources, World};
+use crate::audio::AudioSource;
+use crate::ecs::{Entity, Name, Resources, World, child_map, parent_of, set_parent};
 use crate::math::{Camera, Projection, Quat, Transform, Vec3};
 use crate::render::{LightUniform, MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::script::Script;
@@ -110,7 +126,7 @@ pub struct LightDesc {
 }
 
 /// One entity.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntityDesc {
     /// The entity's [`Name`] component, if any.
@@ -135,6 +151,118 @@ pub struct EntityDesc {
     /// project directory; none for an unscripted entity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    /// The entity's [`AudioSource`] (GE-036); none for a silent entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioDesc>,
+    /// Entities parented to this one (GE-031), whose transforms are local
+    /// to it. Default empty, and left out of the file when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<EntityDesc>,
+}
+
+/// An [`AudioSource`] in file form. Every field but `source` has a default
+/// and is left out when it has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioDesc {
+    /// The sound, as an audio [`AssetSource`] string: an `.ogg` or `.wav`
+    /// path such as `assets/sounds/blip.wav`.
+    pub source: String,
+    /// Linear volume; default `1.0`.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub volume: f32,
+    /// Whether the sound repeats until stopped; default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub looping: bool,
+    /// Whether the volume falls off with the distance from the camera;
+    /// default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spatial: bool,
+    /// Whether the sound starts when play starts; default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub autoplay: bool,
+}
+
+impl Default for AudioDesc {
+    /// No source, full volume, one-shot, not spatial, no autoplay.
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            volume: 1.0,
+            looping: false,
+            spatial: false,
+            autoplay: false,
+        }
+    }
+}
+
+impl AudioDesc {
+    /// `audio` in file form.
+    pub fn from_source(audio: &AudioSource) -> Self {
+        Self {
+            source: audio.source.to_string(),
+            volume: audio.volume,
+            looping: audio.looping,
+            spatial: audio.spatial,
+            autoplay: audio.autoplay,
+        }
+    }
+
+    /// The component this describes. Fails if `source` does not parse as
+    /// an audio asset source.
+    pub fn to_source(&self) -> anyhow::Result<AudioSource> {
+        let source = AssetSource::parse(&self.source)?;
+        anyhow::ensure!(
+            source.is_audio(),
+            "{source} is not a sound source (.ogg or .wav)"
+        );
+        Ok(AudioSource {
+            source,
+            volume: self.volume,
+            looping: self.looping,
+            spatial: self.spatial,
+            autoplay: self.autoplay,
+        })
+    }
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn is_one(x: &f32) -> bool {
+    *x == 1.0
+}
+
+fn is_false(x: &bool) -> bool {
+    !*x
+}
+
+impl EntityDesc {
+    /// This entity and its descendants, depth first, as `(entity, index
+    /// of its parent in the output)`; the first entry is `self` with
+    /// `parent`.
+    fn flatten<'a>(
+        &'a self,
+        parent: Option<usize>,
+        out: &mut Vec<(&'a EntityDesc, Option<usize>)>,
+    ) {
+        let index = out.len();
+        out.push((self, parent));
+        for child in &self.children {
+            child.flatten(Some(index), out);
+        }
+    }
+}
+
+/// `entities` and all their descendants, depth first, each with the index
+/// of its parent in the output (`None` for a root).
+fn flatten(entities: &[EntityDesc]) -> Vec<(&EntityDesc, Option<usize>)> {
+    let mut out = Vec::new();
+    for entity in entities {
+        entity.flatten(None, &mut out);
+    }
+    out
 }
 
 /// A [`Transform`] in editable units.
@@ -184,23 +312,32 @@ impl TransformDesc {
 }
 
 impl SceneFile {
-    /// Captures `world`'s entities that have a [`Transform`] (in entity id
-    /// order, which is spawn order after a [`load`]), the [`Camera`]
-    /// resource, and the [`RenderState`] light.
+    /// Captures `world`'s entities that have a [`Transform`] (roots in
+    /// entity id order, each with its children nested in id order), the
+    /// [`Camera`] resource, and the [`RenderState`] light.
     ///
     /// Fails if an entity draws a mesh with no [`AssetSource`] (one added
     /// from code rather than through [`Assets`]) or the camera is
     /// orthographic.
     pub fn capture(world: &World, res: &Resources) -> anyhow::Result<Self> {
+        Self::capture_with_ids(world, res).map(|(scene, _)| scene)
+    }
+
+    /// [`Self::capture`], also returning the captured entities in the
+    /// order [`apply`] spawns them (depth first, as the file nests them),
+    /// so a caller can match the entities a later `apply` creates to
+    /// these ids (GE-024's play mode does).
+    pub fn capture_with_ids(world: &World, res: &Resources) -> anyhow::Result<(Self, Vec<Entity>)> {
         let state = res.get::<RenderState>();
-        let mut rows: Vec<(u64, EntityDesc)> = Vec::new();
-        for (entity, transform, instance, name, script) in world
+        let mut rows: HashMap<Entity, EntityDesc> = HashMap::new();
+        for (entity, transform, instance, name, script, audio) in world
             .query::<(
                 Entity,
                 &Transform,
                 Option<&MeshInstance>,
                 Option<&Name>,
                 Option<&Script>,
+                Option<&AudioSource>,
             )>()
             .iter()
         {
@@ -244,19 +381,44 @@ impl SceneFile {
                 color,
                 texture,
                 script: script.map(|s| s.path.to_string_lossy().into_owned()),
+                audio: audio.map(AudioDesc::from_source),
+                children: Vec::new(),
             };
-            rows.push((id, desc));
+            rows.insert(entity, desc);
         }
-        rows.sort_by_key(|(id, _)| *id);
+
+        // Nest children under their parents. A parent without a transform
+        // is not in the file, so its children are written as roots; so is
+        // anything a (malformed) cycle would otherwise leave out.
+        let children = child_map(world);
+        let mut roots: Vec<Entity> = rows
+            .keys()
+            .copied()
+            .filter(|&entity| !parent_of(world, entity).is_some_and(|p| rows.contains_key(&p)))
+            .collect();
+        roots.sort_by_key(|entity| entity.to_bits());
+        let mut ids = Vec::new();
+        let mut entities: Vec<EntityDesc> = roots
+            .iter()
+            .map(|&root| nest(root, &mut rows, &children, &mut ids))
+            .collect();
+        let mut left: Vec<Entity> = rows.keys().copied().collect();
+        left.sort_by_key(|entity| entity.to_bits());
+        for entity in left {
+            if rows.contains_key(&entity) {
+                entities.push(nest(entity, &mut rows, &children, &mut ids));
+            }
+        }
 
         let camera = res.get::<Camera>().map(camera_desc).transpose()?;
         let light = state.map(|s| light_desc(&s.light));
-        Ok(Self {
+        let scene = Self {
             version: VERSION,
             camera,
             light,
-            entities: rows.into_iter().map(|(_, desc)| desc).collect(),
-        })
+            entities,
+        };
+        Ok((scene, ids))
     }
 
     /// The scene as RON text, the exact bytes [`save`] writes.
@@ -284,6 +446,27 @@ impl SceneFile {
     }
 }
 
+/// Takes `entity`'s description out of `rows` with those of its
+/// descendants (from `children`, which lists them in id order) nested
+/// inside it, appending every entity taken to `ids` depth first.
+fn nest(
+    entity: Entity,
+    rows: &mut HashMap<Entity, EntityDesc>,
+    children: &HashMap<Entity, Vec<Entity>>,
+    ids: &mut Vec<Entity>,
+) -> EntityDesc {
+    let mut desc = rows.remove(&entity).expect("entity captured once");
+    ids.push(entity);
+    if let Some(kids) = children.get(&entity) {
+        for &child in kids {
+            if rows.contains_key(&child) {
+                desc.children.push(nest(child, rows, children, ids));
+            }
+        }
+    }
+    desc
+}
+
 /// Writes `world`'s entities, the camera, and the light to `path` (see
 /// [`SceneFile::capture`]), creating missing parent directories.
 ///
@@ -303,16 +486,17 @@ pub fn save(world: &World, res: &Resources, path: &Path) -> anyhow::Result<()> {
 }
 
 /// Replaces `world`'s entities with the scene in `path` and applies its
-/// camera and light. Returns the number of entities spawned.
+/// camera and light. Returns the number of entities spawned, nested ones
+/// included.
 ///
 /// Meshes and textures are resolved through the [`Assets`] resource
 /// (relative file sources against its root) and uploaded into the
-/// [`RenderState`] registries (`queue` uploads texture pixels).
-/// Everything is parsed, validated, and resolved before the world is
-/// cleared, so a failed load leaves the world untouched. Fails on a parse
-/// error, an unknown field (named), an unsupported version, an invalid
-/// camera or light, or a mesh or texture source that does not resolve (the
-/// error names the source).
+/// [`RenderState`] registries (`queue` uploads texture pixels); sounds are
+/// decoded into the same cache. Everything is parsed, validated, and
+/// resolved before the world is cleared, so a failed load leaves the world
+/// untouched. Fails on a parse error, an unknown field (named), an
+/// unsupported version, an invalid camera or light, or a mesh, texture, or
+/// sound source that does not resolve (the error names the source).
 pub fn load(
     world: &mut World,
     res: &mut Resources,
@@ -328,8 +512,8 @@ pub fn load(
 }
 
 /// [`load`] for an already parsed scene, for example one captured in
-/// memory with [`SceneFile::capture`] (GE-024 restores play-mode snapshots
-/// this way). Same validation and errors as [`load`].
+/// memory with [`SceneFile::capture`]. Same validation and errors as
+/// [`load`].
 pub fn apply(
     world: &mut World,
     res: &mut Resources,
@@ -337,6 +521,19 @@ pub fn apply(
     queue: &wgpu::Queue,
     scene: &SceneFile,
 ) -> anyhow::Result<usize> {
+    apply_entities(world, res, device, queue, scene).map(|spawned| spawned.len())
+}
+
+/// [`apply`], returning the entities it spawned in spawn order: depth
+/// first, as the file nests them, the order [`SceneFile::capture_with_ids`]
+/// lists ids in (GE-024 restores play-mode snapshots this way).
+pub fn apply_entities(
+    world: &mut World,
+    res: &mut Resources,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &SceneFile,
+) -> anyhow::Result<Vec<Entity>> {
     if let Some(camera) = &scene.camera {
         validate_camera(camera)?;
     }
@@ -346,11 +543,17 @@ pub fn apply(
             "light direction must not be zero"
         );
     }
-    let resolved = resolve_assets(res, device, queue, &scene.entities)?;
+    let flat = flatten(&scene.entities);
+    let resolved = resolve_assets(res, device, queue, &flat)?;
+    let sounds = resolve_sounds(res, &flat)?;
 
     world.clear();
-    for (desc, assets) in scene.entities.iter().zip(resolved) {
+    let mut spawned: Vec<Entity> = Vec::with_capacity(flat.len());
+    for (((desc, parent), assets), audio) in flat.iter().zip(resolved).zip(sounds) {
         let entity = world.spawn((desc.transform.to_transform(),));
+        if let Some(audio) = audio {
+            world.insert_one(entity, audio)?;
+        }
         if let Some((mesh, texture)) = assets {
             let color = desc.color.unwrap_or([1.0; 4]);
             let instance = MeshInstance {
@@ -366,6 +569,11 @@ pub fn apply(
         if let Some(path) = &desc.script {
             world.insert_one(entity, Script::new(path))?;
         }
+        if let Some(parent) = parent {
+            // The file's transform is already local to the parent.
+            set_parent(world, entity, Some(spawned[*parent]), false)?;
+        }
+        spawned.push(entity);
     }
 
     if let Some(desc) = &scene.camera {
@@ -381,7 +589,7 @@ pub fn apply(
             ambient: Vec3::from(desc.ambient).extend(1.0).to_array(),
         };
     }
-    Ok(scene.entities.len())
+    Ok(spawned)
 }
 
 /// What an entity draws: its mesh and optional texture.
@@ -389,11 +597,13 @@ type DrawAssets = (MeshHandle, Option<TextureHandle>);
 
 /// The mesh and texture handles of every entity that draws a mesh, in
 /// order, uploading sources as needed. A texture without a mesh is ignored.
+/// `entities` is the flattened scene; the index in an error is the
+/// position there (depth first).
 fn resolve_assets(
     res: &mut Resources,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    entities: &[EntityDesc],
+    entities: &[(&EntityDesc, Option<usize>)],
 ) -> anyhow::Result<Vec<Option<DrawAssets>>> {
     // Resources lend one value mutably at a time, so `Assets` is moved out
     // for the duration and always put back.
@@ -406,7 +616,7 @@ fn resolve_assets(
         entities
             .iter()
             .enumerate()
-            .map(|(i, desc)| {
+            .map(|(i, (desc, _))| {
                 let Some(text) = &desc.mesh else {
                     return Ok(None);
                 };
@@ -432,6 +642,36 @@ fn resolve_assets(
     })();
     res.insert(assets);
     result
+}
+
+/// The [`AudioSource`] of every entity that has an `audio` field, in
+/// order, decoding each sound into the [`Assets`] cache so a missing or
+/// unreadable file is reported here, before the world is touched.
+/// `entities` is the flattened scene; the index in an error is the
+/// position there (depth first).
+fn resolve_sounds(
+    res: &mut Resources,
+    entities: &[(&EntityDesc, Option<usize>)],
+) -> anyhow::Result<Vec<Option<AudioSource>>> {
+    let assets = res.get_mut::<Assets>().context("no Assets resource")?;
+    entities
+        .iter()
+        .enumerate()
+        .map(|(i, (desc, _))| {
+            desc.audio
+                .as_ref()
+                .map(|audio| -> anyhow::Result<AudioSource> {
+                    let source = audio.to_source()?;
+                    assets.sound(&source.source)?;
+                    Ok(source)
+                })
+                .transpose()
+                .with_context(|| {
+                    let text = desc.audio.as_ref().map_or("", |a| a.source.as_str());
+                    format!("entity {i}: sound {text:?} could not be loaded")
+                })
+        })
+        .collect()
 }
 
 fn validate_camera(desc: &CameraDesc) -> anyhow::Result<()> {
@@ -632,6 +872,139 @@ mod tests {
             [&Value::Null, &Value::Null, &Value::Null, &png, &embedded]
         );
         assert_eq!(engine.resources.expect::<RenderState>().textures.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// GE-031: a three-level tree saves nested, reloads with the same
+    /// parents and world transforms, and saves again byte for byte.
+    #[test]
+    fn hierarchy_three_level_round_trip_is_byte_identical() -> anyhow::Result<()> {
+        let dir = temp_dir("hierarchy");
+        let reg = ToolRegistry::with_engine_tools();
+        let mut engine = Headless::new(8, 8)?;
+        let cube =
+            call_json(&reg, &mut engine, "mesh.builtin", json!({ "kind": "cube" }))["handle"]
+                .clone();
+        let spawn = |engine: &mut Headless, args: Value| -> u64 {
+            call_json(&reg, engine, "entity.spawn", args)["entity"]
+                .as_u64()
+                .unwrap()
+        };
+        let root = spawn(
+            &mut engine,
+            json!({ "mesh": cube, "name": "root", "translation": [1, 0, 0],
+                    "rotation_euler_deg": [0, 90, 0] }),
+        );
+        let arm = spawn(
+            &mut engine,
+            json!({ "mesh": cube, "name": "arm", "translation": [1, 0, 0], "parent": root }),
+        );
+        let hand = spawn(
+            &mut engine,
+            json!({ "mesh": cube, "name": "hand", "translation": [0, 1, 0], "parent": arm,
+                    "scale": [0.5, 0.5, 0.5] }),
+        );
+        // A second root after the tree and a second child of the root, so
+        // the id order of roots and of siblings is exercised.
+        spawn(&mut engine, json!({ "mesh": cube, "name": "loose" }));
+        spawn(
+            &mut engine,
+            json!({ "mesh": cube, "name": "arm2", "translation": [-1, 0, 0], "parent": root }),
+        );
+        let world_before = call_json(&reg, &mut engine, "entity.list", json!({}));
+        let hand_world = world_before
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["entity"] == hand)
+            .unwrap()["world_translation"]
+            .clone();
+
+        let first = dir.join("first.scene.ron");
+        let out = call_json(&reg, &mut engine, "scene.save", json!({ "path": first }));
+        assert_eq!(out["entities"], 5);
+        let text = std::fs::read_to_string(&first)?;
+        // Nesting in the file: hand inside arm inside root; loose is a root.
+        let pos = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {text}"))
+        };
+        assert!(pos("name: \"root\"") < pos("children: ["), "{text}");
+        assert!(pos("name: \"arm\"") < pos("name: \"hand\""), "{text}");
+        assert!(pos("name: \"hand\"") < pos("name: \"arm2\""), "{text}");
+        assert!(pos("name: \"arm2\"") < pos("name: \"loose\""), "{text}");
+        assert_eq!(text.matches("children: [").count(), 2, "{text}");
+        let parsed = SceneFile::from_ron(&text)?;
+        assert_eq!(parsed.entities.len(), 2);
+        assert_eq!(parsed.entities[0].children.len(), 2);
+        assert_eq!(parsed.entities[0].children[0].children.len(), 1);
+        assert!(parsed.entities[1].children.is_empty());
+
+        call_json(&reg, &mut engine, "scene.clear", json!({}));
+        let out = call_json(&reg, &mut engine, "scene.load", json!({ "path": first }));
+        assert_eq!(out, json!({ "entities": 5 }));
+        let second = dir.join("second.scene.ron");
+        call_json(&reg, &mut engine, "scene.save", json!({ "path": second }));
+        assert_eq!(
+            std::fs::read_to_string(&second)?,
+            text,
+            "save -> load -> save changed the file"
+        );
+
+        // The reloaded tree has the same shape and world positions.
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}));
+        let rows = list.as_array().unwrap();
+        let by_name = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap();
+        assert_eq!(by_name("arm")["parent"], by_name("root")["entity"]);
+        assert_eq!(by_name("hand")["parent"], by_name("arm")["entity"]);
+        assert_eq!(by_name("arm2")["parent"], by_name("root")["entity"]);
+        assert!(by_name("loose").get("parent").is_none());
+        let got: Vec<f64> = serde_json::from_value(by_name("hand")["world_translation"].clone())?;
+        let want: Vec<f64> = serde_json::from_value(hand_world)?;
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() < 1e-4, "{got:?} != {want:?}");
+        }
+        // (1, 0, 0) rotated 90° about Y from (1, 0, 0), then up one.
+        assert!((got[0] - 1.0).abs() < 1e-4 && (got[1] - 1.0).abs() < 1e-4);
+        assert!((got[2] + 1.0).abs() < 1e-4, "{got:?}");
+
+        // The capture ids come in the order apply spawns.
+        let (scene, ids) = SceneFile::capture_with_ids(&engine.world, &engine.resources)?;
+        let names: Vec<String> = ids
+            .iter()
+            .map(|e| engine.world.get::<&Name>(*e).unwrap().0.clone())
+            .collect();
+        assert_eq!(names, ["root", "arm", "hand", "arm2", "loose"]);
+        assert_eq!(scene, parsed);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn hierarchy_children_parse_with_defaults_and_bad_meshes_name_the_index() -> anyhow::Result<()>
+    {
+        let scene = SceneFile::from_ron(
+            "(version: 1, entities: [(children: [(), (mesh: \"builtin://cube\")])])",
+        )?;
+        assert_eq!(scene.entities[0].children.len(), 2);
+        assert_eq!(
+            scene.entities[0].children[1].mesh.as_deref(),
+            Some("builtin://cube")
+        );
+
+        let dir = temp_dir("hierarchy-bad");
+        let reg = ToolRegistry::with_engine_tools();
+        let mut engine = Headless::new(8, 8)?;
+        let path = dir.join("bad.scene.ron");
+        std::fs::write(
+            &path,
+            "(version: 1, entities: [(children: [(mesh: \"builtin://cube\"), (mesh: \"builtin://torus\")])])",
+        )?;
+        let err = call_err(&reg, &mut engine, "scene.load", json!({ "path": path }));
+        assert!(err.contains("entity 2"), "{err}");
+        assert!(err.contains("builtin://torus"), "{err}");
+        assert_eq!(engine.world.len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

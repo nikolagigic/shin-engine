@@ -99,15 +99,53 @@ changes the entity, as does `entity.transform.translation.y = 1.0`.
 |--------|---------|
 | `.id` | The entity's id, the same number the tools use; read-only. |
 | `.name` | Its name, or an empty string; read-only. |
-| `.transform` | Its `Transform`; readable and writable. |
+| `.transform` | Its `Transform`, **local to its parent** (world space for an entity without one); readable and writable. |
+| `.world_transform` | Its `Transform` in world space, after its parents', as it was at the start of the step. Read-only: it is a copy, and changing it changes nothing. |
+
+An entity's [parent](scenes.md#children) moves it along. A script on a
+child that sets `entity.transform.translation` places the child relative
+to its parent, so it keeps following the parent. To find out where the
+entity really is, read `entity.world_transform`.
 
 ### Functions
 
 | Function | Meaning |
 |----------|---------|
 | `time()` | Simulated seconds since play started. |
+| `action_pressed(name)` | Whether the input action `name` is held. |
+| `action_just_pressed(name)` | Whether `name` went down since the previous step. True in exactly one step per press. |
+| `action_axis(name)` | The value of `name` from -1 to 1. A button action reads 1 while held. |
+| `play_sound(path)` | Plays an `.ogg` or `.wav` file (relative to the project) once, everywhere, at full volume. See [Audio](audio.md). |
+| `play_sound_at(entity, path)` | Plays the file once at `entity`: it fades with the distance from the camera and follows the entity. |
 | `print(x)` | Writes `script: x` to the engine log at info level (the editor's Log panel). |
 | `debug(x)` | Writes to the log at debug level. |
+
+### Input actions
+
+Actions are named and bound in the project's `shin.toml`, as
+[Projects](projects.md#input-actions) describes. A script reads them by
+name and never by key, so players can rebind without touching the
+script. Naming an action the project does not define is a runtime error
+that lists the actions that exist.
+
+This is the starter project's `scripts/player.rhai`:
+
+```rhai
+{{#include ../../crates/shin-engine/src/project/template/player.rhai}}
+```
+
+To try a script without a keyboard, play the scene and drive the actions
+with the `input.set` tool. `script.eval` reads the same values, so
+`script.eval {"source": "action_axis(\"move_x\")"}` shows what a script
+would see.
+
+### Sounds
+
+Sounds a script asks for with `play_sound` or `play_sound_at` start
+after every script has run for that step. A sound that cannot be loaded
+(a wrong path, say) is logged as a warning and does not stop the script.
+The starter project's `scripts/moon.rhai` blips once per revolution; see
+[Audio](audio.md#the-starter-project).
 
 Scripts cannot spawn entities, reach other entities, or call other
 scripts. The `script.eval` tool evaluates a Rhai expression with the same
@@ -171,5 +209,7 @@ and File > Save writes it into the scene.
 | `script.attach` | Attaches a `.rhai` file to an entity (or removes it with an empty path), compiles it, and reports the compile error if any. Undoable. |
 | `script.eval`   | Evaluates Rhai source with the script API and returns its result as JSON. |
 | `script.errors` | Lists the latest compile or runtime error of each script that has one. |
+| `input.set`     | Holds, releases, or sets the axis of an input action on an engine with no devices. |
+| `input.list`    | Lists the input actions with their bindings and current values. |
 
 See the [Tools reference](reference/tools.md).

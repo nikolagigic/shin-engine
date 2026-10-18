@@ -45,8 +45,12 @@ mod project {
     fn scaffolded_manifest_round_trips() -> anyhow::Result<()> {
         let dir = scaffold("round-trip")?;
         let loaded = Project::load(&dir)?;
+        // The starter binds jump, move_x, and move_z (GE-033).
+        let actions: Vec<&str> = loaded.input.actions.keys().map(String::as_str).collect();
+        assert_eq!(actions, ["jump", "move_x", "move_z"]);
         let mut expected = Project::new("round-trip");
         expected.entry_scene = Some(PathBuf::from(project::STARTER_SCENE));
+        expected.input = loaded.input.clone();
         assert_eq!(loaded, expected);
         assert_eq!(loaded.window.title, "round-trip");
         loaded.save(&dir)?;

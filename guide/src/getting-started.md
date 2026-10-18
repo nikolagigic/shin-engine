@@ -62,8 +62,10 @@ cargo run
 The first build compiles the engine for the project (a few minutes), then
 a window opens with the starter scene: a dark ground slab, an orange cube
 turned a little so the light catches three faces, and a small pale moon
-circling the cube once every 6.3 seconds. The orbit is a Rust system in
-the project's `src/main.rs`; the scene itself is `scenes/main.scene.ron`.
+circling the cube once every 6.3 seconds, with a short blip each time
+it comes round. The orbit is a Rust system in the project's
+`src/main.rs`, the blip is the moon's script `scripts/moon.rhai`, and the
+scene itself is `scenes/main.scene.ron`.
 
 Controls, from the starter game:
 

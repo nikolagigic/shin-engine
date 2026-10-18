@@ -20,6 +20,9 @@
 //! them by [`MeshHandle`] and [`TextureHandle`] into one instanced draw call
 //! per (mesh, texture) pair. Meshes live in the [`MeshRegistry`] and
 //! textures in the [`TextureRegistry`] inside the [`RenderState`] resource.
+//! An entity with a [`GlobalTransform`] (GE-031: every entity with a
+//! transform, once the hierarchy has been propagated) is drawn where that
+//! says; otherwise its `Transform` is taken as world space.
 //!
 //! Textures (GE-025): the shader multiplies a base-colour texture
 //! (`@group(1)`: texture at binding 0, the renderer's one sampler at
@@ -39,7 +42,7 @@ use std::ops::Range;
 use wgpu::util::DeviceExt as _;
 
 use crate::asset::{AssetSource, ImageData, MeshData, Vertex};
-use crate::ecs::{Resources, World};
+use crate::ecs::{GlobalTransform, Resources, World};
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::math::{Camera, Mat3, Transform};
 
@@ -878,7 +881,8 @@ impl RenderState {
 
 /// Draws every entity with a [`Transform`] and a [`MeshInstance`] as seen
 /// by the [`Camera`] resource: one instanced draw call per distinct
-/// (mesh, texture) pair, all in one pass.
+/// (mesh, texture) pair, all in one pass. An entity is placed by its
+/// [`GlobalTransform`] when it has one, else by its `Transform`.
 ///
 /// `color` and `depth` are loaded, not cleared (the game loop and
 /// [`crate::headless::Headless`] clear both before rendering). `aspect` is
@@ -905,7 +909,10 @@ pub fn render_world(
     // Group instances by (mesh, texture).
     state.batches.values_mut().for_each(Vec::clear);
     let mut unknown = 0;
-    for (transform, instance) in world.query_mut::<(&Transform, &MeshInstance)>() {
+    for (transform, global, instance) in
+        world.query_mut::<(&Transform, Option<&GlobalTransform>, &MeshInstance)>()
+    {
+        let transform = global.map_or(transform, |global| &global.0);
         let known = state.registry.contains(instance.mesh)
             && instance.texture.is_none_or(|t| state.textures.contains(t));
         if !known {

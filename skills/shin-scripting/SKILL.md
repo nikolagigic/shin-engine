@@ -44,7 +44,9 @@ fn update(entity, dt) {
 ## Steps
 
 1. **Find the entity.** `entity.list` returns ids, names, and any script
-   already attached. Note the id of the entity to script.
+   already attached. Note the id of the entity to script. In the starter
+   project the cube already runs `scripts/player.rhai` and the moon
+   `scripts/moon.rhai`; attaching another script replaces the old one.
 
 2. **Try expressions first (optional).** `script.eval` with
    `{"source": "quat_euler(0.0, PI() / 2.0, 0.0) * vec3(1.0, 0.0, 0.0)"}`

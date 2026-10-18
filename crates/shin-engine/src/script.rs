@@ -11,11 +11,12 @@
 //! }
 //! ```
 //!
-//! `entity` has `id`, `name`, and `transform` (with `translation`,
-//! `rotation`, and `scale`); `dt` is the fixed step in seconds; `time()` is
-//! the simulated seconds since play started. Changes to `entity.transform`
-//! are written back to the entity after the call. Scripts cannot spawn
-//! entities or call each other.
+//! `entity` has `id`, `name`, `transform` (with `translation`, `rotation`,
+//! and `scale`, local to the entity's parent), and `world_transform` (the
+//! same fields in world space, read-only); `dt` is the fixed step in
+//! seconds; `time()` is the simulated seconds since play started. Changes
+//! to `entity.transform` are written back to the entity after the call.
+//! Scripts cannot spawn entities or call each other.
 //!
 //! Only `update` (and the functions it calls) runs; statements outside
 //! functions do not. Rhai functions cannot see outer variables, so keep
@@ -32,8 +33,18 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only) and `transform`.
+//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
+//!   the parent, written back), and `world_transform` (read-only).
 //! - `time()`: simulated seconds since play started.
+//! - `action_pressed(name)`, `action_just_pressed(name)`,
+//!   `action_axis(name)`: the input actions bound in `shin.toml` (see
+//!   [`crate::input::Actions`]); an action the project does not define is
+//!   a runtime error.
+//! - `play_sound(path)`: plays an `.ogg` or `.wav` file (an audio asset
+//!   source relative to the project) once, everywhere; `play_sound_at(entity,
+//!   path)` plays it at the entity, so it fades with the distance from the
+//!   camera and follows the entity (GE-036). Sounds queued during a step
+//!   start after every script has run.
 //!
 //! Numbers are `f64` in scripts and `f32` in the engine; vector setters
 //! also accept integers, so `v.y = 1` works.
@@ -58,6 +69,7 @@
 //! `script.errors`.
 
 mod bindings;
+mod input;
 mod tools;
 
 use std::cell::{Cell, RefCell};
@@ -71,11 +83,14 @@ use rhai::{AST, CallFnOptions, Dynamic, Engine, Scope};
 
 pub use tools::register_tools;
 
-use crate::asset::Assets;
+use crate::asset::{AssetSource, Assets};
+use crate::audio::{self, PlayParams};
 use crate::ecs::{Entity, Name, Resources, Time, World};
 use crate::headless::PlayState;
+use crate::input::Actions;
 use crate::math::Transform;
-use bindings::{ScriptEntity, ScriptTransform};
+use bindings::{ScriptEntity, ScriptTransform, SoundQueue, SoundRequest};
+use input::ActionSnapshot;
 
 /// The function every script defines; [`script_system`] calls it as
 /// `update(entity, dt)`.
@@ -143,6 +158,10 @@ pub struct ScriptEngine {
     engine: Engine,
     /// What `time()` returns; set before each batch of calls.
     clock: Rc<Cell<f64>>,
+    /// Sounds scripts asked for since [`Self::take_sound_requests`].
+    sounds: SoundQueue,
+    /// What the `action_*` functions read; set before each batch of calls.
+    actions: ActionSnapshot,
     /// Loaded scripts by path as written in [`Script`].
     scripts: HashMap<PathBuf, Loaded>,
     /// The latest error of each script, by path as written.
@@ -164,16 +183,21 @@ impl ScriptEngine {
     /// scripts go to the log.
     pub fn new() -> Self {
         let clock = Rc::new(Cell::new(0.0));
+        let sounds: SoundQueue = Rc::new(RefCell::new(Vec::new()));
         let mut engine = Engine::new();
         engine.set_max_operations(MAX_OPERATIONS);
         engine.on_print(|text| log::info!("script: {text}"));
         engine.on_debug(|text, source, pos| {
             log::debug!("script {}{pos:?}: {text}", source.unwrap_or(""));
         });
-        bindings::register(&mut engine, Rc::clone(&clock));
+        bindings::register(&mut engine, Rc::clone(&clock), Rc::clone(&sounds));
+        let actions = ActionSnapshot::default();
+        input::register(&mut engine, Rc::clone(&actions));
         Self {
             engine,
             clock,
+            sounds,
+            actions,
             scripts: HashMap::new(),
             errors: BTreeMap::new(),
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -185,6 +209,14 @@ impl ScriptEngine {
     /// every call.
     pub fn set_poll_interval(&mut self, interval: Duration) {
         self.poll_interval = interval;
+    }
+
+    /// Makes the `action_*` functions read the current values of
+    /// `actions` (none if `None`) until the next call. [`script_system`]
+    /// does this before every batch of `update` calls; `script.eval` does
+    /// it before evaluating.
+    pub fn set_actions(&mut self, actions: Option<&Actions>) {
+        *self.actions.borrow_mut() = input::snapshot(actions);
     }
 
     /// Reads and compiles the script at `path` (resolved against `base`
@@ -289,6 +321,12 @@ impl ScriptEngine {
         self.errors.values()
     }
 
+    /// The sounds scripts asked for (`play_sound`, `play_sound_at`) since
+    /// the last call, oldest first, leaving the queue empty.
+    fn take_sound_requests(&mut self) -> Vec<SoundRequest> {
+        std::mem::take(&mut *self.sounds.borrow_mut())
+    }
+
     /// The latest error of the script at `path` (as written in its
     /// [`Script`]), if it has one.
     pub fn error(&self, path: &Path) -> Option<&ScriptError> {
@@ -356,8 +394,10 @@ fn modified(file: &Path) -> Option<SystemTime> {
 }
 
 /// Fixed system: runs `update(entity, dt)` for every entity with a
-/// [`Script`] and a [`Transform`], in entity id order, then writes each
-/// script's transform back.
+/// [`Script`] and a [`Transform`], in entity id order, writes each
+/// script's transform back, then plays the sounds the scripts asked for
+/// (`play_sound`, `play_sound_at`); a sound that cannot be played is
+/// logged.
 ///
 /// Does nothing while editing or paused (see the [module docs](self)).
 /// Inserts a [`ScriptEngine`] if there is none, and first reloads scripts
@@ -384,19 +424,27 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
         return;
     }
     scripted.sort_by_key(|(entity, ..)| entity.to_bits());
+    // World transforms as of the start of the step, before any script runs.
+    let worlds: Vec<Transform> = scripted
+        .iter()
+        .map(|(entity, ..)| crate::ecs::world_transform(world, *entity))
+        .collect();
 
     let base = script_base(res);
+    let actions = input::snapshot(res.get::<Actions>());
     if res.get::<ScriptEngine>().is_none() {
         res.insert(ScriptEngine::new());
     }
     let scripts = res.expect_mut::<ScriptEngine>();
     scripts.reload_changed(&base);
     scripts.clock.set(t);
-    for (entity, path, transform, name) in scripted {
+    *scripts.actions.borrow_mut() = actions;
+    for ((entity, path, transform, name), world_space) in scripted.into_iter().zip(worlds) {
         let handle = ScriptEntity {
             id: entity.to_bits().get() as rhai::INT,
             name,
             transform: ScriptTransform(Rc::new(RefCell::new(transform))),
+            world: world_space,
         };
         if let Some(updated) = scripts.run(&path, &base, handle, time.fixed_dt)
             && let Ok(mut transform) = world.get::<&mut Transform>(entity)
@@ -404,6 +452,33 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
             *transform = updated;
         }
     }
+    let requests = scripts.take_sound_requests();
+    for request in requests {
+        if let Err(err) = play_requested(res, &request) {
+            log::warn!("script: play_sound({:?}) failed: {err:#}", request.path);
+        }
+    }
+}
+
+/// Plays one [`SoundRequest`]: everywhere, or at (and following) the
+/// entity it names.
+fn play_requested(res: &mut Resources, request: &SoundRequest) -> anyhow::Result<()> {
+    let source = AssetSource::parse(&request.path)?;
+    let (entity, position) = match request.at {
+        Some((id, position)) => (Entity::from_bits(id as u64), Some(position)),
+        None => (None, None),
+    };
+    audio::play(
+        res,
+        &source,
+        PlayParams {
+            volume: 1.0,
+            looping: false,
+            position,
+            entity,
+        },
+    )?;
+    Ok(())
 }
 
 /// The directory script paths are relative to: the [`Assets`] root, or

@@ -28,11 +28,14 @@ cause with the engine's tools, and confirm the fix in a new frame.
    project is open; open one with `project.open` and `{"dir": "<path>"}`).
 
 3. **List entities.** `entity.list` with `{"limit": 100}` returns each
-   entity's id, translation, rotation, scale, name, mesh, colour,
-   texture, and script. Look for:
+   entity's id, local translation, rotation, and scale, its
+   `world_translation`, parent, name, mesh, colour, texture, and script.
+   Look for:
    - entities with no `mesh`: they draw nothing;
-   - a `scale` with a 0 component: invisible;
-   - translations far from the others or from the camera's target;
+   - a `scale` with a 0 component: invisible, and so are its children;
+   - `world_translation` far from the others or from the camera's target
+     (a child's `translation` is relative to its parent, so compare world
+     positions);
    - an alpha of 0, or a colour near `[0, 0, 0]`.
 
 4. **Check meshes.** `mesh.list` shows every uploaded mesh with its
@@ -42,7 +45,7 @@ cause with the engine's tools, and confirm the fix in a new frame.
 
 5. **Aim the camera at the problem.** `camera.set` with
    `{"position": [x + 3, y + 2, z + 3], "look_at": [x, y, z]}`, where
-   `[x, y, z]` is the entity's translation from `entity.list` (compute
+   `[x, y, z]` is the entity's `world_translation` from `entity.list` (compute
    the numbers; the tool takes plain arrays). Render again. If the object
    appears, the original camera was the cause. Pull back further for
    large scales; a larger `fov_y_deg` widens the view.
@@ -72,6 +75,7 @@ cause with the engine's tools, and confirm the fix in a new frame.
 | Object missing | Behind the camera, inside another object, scale 0, or no mesh | Steps 3 and 5 |
 | Everything black | Light points away and ambient is 0 | Step 6 |
 | Colours too bright or pale | sRGB values passed as linear | Use linear values (sRGB 0.5 is linear 0.21) |
+| Child in the wrong place | Its translation is local to the parent | Compare `world_translation`; `entity.set_parent` to re-parent |
 | Object half under the floor | Translation is the mesh centre | Raise y by half the scaled height |
 | Picture changes between frames | A system or script moves it | Check `script` in `entity.list`; `sim.stop` if playing |
 | Texture missing | No texture handle passed, or the wrong image | `asset.load` the image and spawn with `texture` |

@@ -6,8 +6,13 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only) and `transform`.
+//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
+//!   the parent), and `world_transform` (read-only; a copy, as of the
+//!   start of the step).
 //! - `time()`: simulated seconds since play started.
+//! - `play_sound(path)` and `play_sound_at(entity, path)` (GE-036): queue
+//!   a sound; [`super::script_system`] plays the queue after the scripts
+//!   ran.
 //!
 //! Numbers are Rhai's `FLOAT` (`f64`) and are stored as `f32`; setters
 //! also accept integers, so `v.y = 1` works.
@@ -20,6 +25,19 @@ use rhai::{Dynamic, Engine, FLOAT, INT};
 use serde_json::{Value, json};
 
 use crate::math::{Quat, Transform, Vec3};
+
+/// A sound a script asked for; played by [`super::script_system`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SoundRequest {
+    /// The audio asset source string the script gave.
+    pub(crate) path: String,
+    /// For `play_sound_at`: the entity's tool id and its position when the
+    /// script called, so the sound is positioned and follows the entity.
+    pub(crate) at: Option<(INT, Vec3)>,
+}
+
+/// The queue scripts push [`SoundRequest`]s onto.
+pub(crate) type SoundQueue = Rc<RefCell<Vec<SoundRequest>>>;
 
 /// The `transform` scripts edit: a shared handle, so a change made through
 /// any copy of it (`entity.transform.translation.y = 1.0`, or
@@ -34,18 +52,42 @@ pub(crate) struct ScriptEntity {
     pub(crate) id: INT,
     /// Its [`crate::ecs::Name`], or empty.
     pub(crate) name: String,
-    /// Its transform, written back after the call.
+    /// Its transform (local to its parent), written back after the call.
     pub(crate) transform: ScriptTransform,
+    /// Its world-space transform at the start of the step (GE-031);
+    /// scripts read it as `world_transform` and cannot change it.
+    pub(crate) world: Transform,
 }
 
 /// Registers every script type and function on `engine`; `time()` reads
-/// `clock`.
-pub(crate) fn register(engine: &mut Engine, clock: Rc<Cell<f64>>) {
+/// `clock`, and the `play_sound*` functions push onto `sounds`.
+pub(crate) fn register(engine: &mut Engine, clock: Rc<Cell<f64>>, sounds: SoundQueue) {
     register_vec3(engine);
     register_quat(engine);
     register_transform(engine);
     register_entity(engine);
     engine.register_fn("time", move || clock.get() as FLOAT);
+    register_sounds(engine, sounds);
+}
+
+fn register_sounds(engine: &mut Engine, sounds: SoundQueue) {
+    let everywhere = Rc::clone(&sounds);
+    engine.register_fn("play_sound", move |path: &str| {
+        everywhere.borrow_mut().push(SoundRequest {
+            path: path.to_string(),
+            at: None,
+        });
+    });
+    engine.register_fn(
+        "play_sound_at",
+        move |entity: &mut ScriptEntity, path: &str| {
+            let position = entity.transform.0.borrow().translation;
+            sounds.borrow_mut().push(SoundRequest {
+                path: path.to_string(),
+                at: Some((entity.id, position)),
+            });
+        },
+    );
 }
 
 fn register_vec3(engine: &mut Engine) {
@@ -119,6 +161,10 @@ fn register_entity(engine: &mut Engine) {
         .register_type_with_name::<ScriptEntity>("Entity")
         .register_get("id", |e: &mut ScriptEntity| e.id)
         .register_get("name", |e: &mut ScriptEntity| e.name.clone())
+        // A fresh copy each read: writing to it changes nothing.
+        .register_get("world_transform", |e: &mut ScriptEntity| {
+            ScriptTransform(Rc::new(RefCell::new(e.world)))
+        })
         .register_get_set(
             "transform",
             |e: &mut ScriptEntity| e.transform.clone(),
