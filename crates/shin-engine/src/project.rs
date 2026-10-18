@@ -921,7 +921,11 @@ mod tests {
             json!({ "title": "tool-game", "width": 1280, "height": 720 })
         );
         assert_eq!((engine.target.width, engine.target.height), (1280, 720));
-        assert_eq!(engine.world.len(), 3, "the entry scene's entities");
+        assert_eq!(
+            engine.world.len() as usize,
+            3 + STARTER_CRATES,
+            "the entry scene's entities"
+        );
         let ToolOutput::Json(info) = reg.call(&mut engine, "project.info", json!({}))? else {
             panic!("expected JSON");
         };
@@ -939,7 +943,7 @@ mod tests {
             "scene.load",
             json!({ "path": "scenes/copy.scene.ron" }),
         )?;
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
 
         // Escaping the root is an error naming the path, for both tools.
         for tool in ["scene.save", "scene.load"] {
@@ -964,7 +968,7 @@ mod tests {
             engine.resources.get::<ProjectRoot>(),
             Some(&ProjectRoot(root))
         );
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
 
         fs::remove_dir_all(&dir)?;
         Ok(())
@@ -1004,7 +1008,7 @@ mod tests {
         project.save(&dir)?;
         let mut engine = Headless::open_project(&dir)?;
         assert_eq!((engine.target.width, engine.target.height), (64, 32));
-        assert_eq!(engine.world.len(), 3);
+        assert_eq!(engine.world.len() as usize, 3 + STARTER_CRATES);
         assert_eq!(engine.render()?.dimensions(), (64, 32));
         fs::remove_dir_all(&dir)?;
         Ok(())

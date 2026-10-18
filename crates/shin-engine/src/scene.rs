@@ -41,12 +41,13 @@
 //! written in entity id order and each child list in id order; loading
 //! spawns depth first in that order.
 //!
-//! Physics (GE-034): `body` is the entity's [`RigidBody`] (`kind` is
-//! `dynamic`, `kinematic`, or `fixed`; `mass` in kg, dynamic only, default
-//! 1) and `collider` its [`Collider`] (`shape` is `cuboid((hx, hy, hz))`
-//! half extents, `ball(radius)`, or `capsule(half_height: h, radius: r)`,
-//! in the entity's own units; `friction` default 0.5, `restitution`
-//! default 0). See [`crate::physics`].
+//! Physics (GE-034): `body` is the entity's [`RigidBody`]: `kind` is
+//! `dynamic`, `kinematic`, or `fixed`, and `mass` (in kg, dynamic only)
+//! defaults to one. `collider` is its [`Collider`]: `shape` is
+//! `cuboid((hx, hy, hz))` half extents, `ball(radius)`, or
+//! `capsule(half_height: h, radius: r)`, in the entity's own units;
+//! `friction` defaults to 0.5 and `restitution` to 0. See
+//! [`crate::physics`].
 //!
 //! Angles (`rotation_euler_deg`, `fov_y_deg`) and `look_at` are derived from
 //! the engine's quaternions and radians, so [`save`] rounds them to four

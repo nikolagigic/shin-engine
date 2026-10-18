@@ -330,10 +330,11 @@ pub struct PhysicsWorld {
 impl Default for PhysicsWorld {
     /// An empty simulation with [`DEFAULT_GRAVITY`].
     fn default() -> Self {
-        let mut rapier = RapierWorld::default();
-        rapier.gravity = to_vector(DEFAULT_GRAVITY);
         Self {
-            rapier,
+            rapier: RapierWorld {
+                gravity: to_vector(DEFAULT_GRAVITY),
+                ..RapierWorld::default()
+            },
             tracked: HashMap::new(),
             warned: HashSet::new(),
         }
@@ -540,7 +541,9 @@ pub fn physics_system(world: &mut World, res: &mut Resources) {
     match res.get::<PlayState>() {
         None | Some(PlayState::Playing { paused: false, .. }) => {}
         Some(PlayState::Edit) => {
-            if let Some(physics) = res.get_mut::<PhysicsWorld>() {
+            if let Some(physics) = res.get_mut::<PhysicsWorld>()
+                && !physics.is_empty()
+            {
                 physics.clear();
             }
             return;
