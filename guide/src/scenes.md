@@ -23,9 +23,9 @@ no rotation and unit scale; the blue cube gives only the parts of its
 transform that differ from that. Optional fields that are absent are
 simply left out, without `Some(...)`.
 
-Two optional entity fields do not appear above. `texture` gives a
-base-colour texture and `script` attaches a Rhai script, like this
-fragment of an entity:
+Three optional entity fields do not appear above. `texture` gives a
+base-colour texture, `script` attaches a Rhai script, and `audio`
+attaches a sound, like this fragment of an entity:
 
 ```ron
 (
@@ -35,6 +35,7 @@ fragment of an entity:
     color: (0.8, 0.1, 0.1, 1.0),
     texture: "assets/checker.png",
     script: "scripts/orbit.rhai",
+    audio: (source: "assets/sounds/blip.wav", spatial: true),
 ),
 ```
 
@@ -86,6 +87,7 @@ Each entry of `entities`:
 | `color`     | `(r, g, b, a)` | no   | Linear RGBA tint of the mesh; default white. Ignored without `mesh`. |
 | `texture`   | string     | no       | Base-colour texture, as a texture asset source; none for untextured. Ignored without `mesh`. |
 | `script`    | string     | no       | A `.rhai` file relative to the project directory, run every fixed step while playing; see [Scripting](scripting.md). |
+| `audio`     | audio      | no       | The entity's sound; see [`audio`](#audio) below and [Audio](audio.md). |
 
 ### `transform`
 
@@ -94,6 +96,18 @@ Each entry of `entities`:
 | `translation`        | `(x, y, z)`  | `(0, 0, 0)`   | Position. |
 | `rotation_euler_deg` | `(x, y, z)`  | `(0, 0, 0)`   | Euler angles in degrees, applied intrinsically about X, then Y, then Z, the same convention the `entity.*` tools use. |
 | `scale`              | `(x, y, z)`  | `(1, 1, 1)`   | Per-axis scale. |
+
+### `audio`
+
+| Field      | Type    | Default | Meaning |
+|------------|---------|---------|---------|
+| `source`   | string  | required | The sound, an `.ogg` or `.wav` [asset source](#asset-sources). |
+| `volume`   | number  | `1.0`   | Linear volume. |
+| `looping`  | bool    | `false` | Repeat until stopped. |
+| `spatial`  | bool    | `false` | Fade with the distance from the camera. |
+| `autoplay` | bool    | `false` | Start when play starts. |
+
+Fields at their default are left out when saving.
 
 ## Asset sources
 
@@ -110,8 +124,10 @@ file never depends on runtime handles. The same strings are accepted by
 | `assets/x.gltf#2`       | Triangle primitive 2 of the file, in document order. |
 | `assets/x.png`          | A texture: a PNG or JPEG file (`.png`, `.jpg`, `.jpeg`, any case). |
 | `assets/x.gltf#image=1` | A texture: image 1 of a glTF file, embedded or referenced. |
+| `assets/x.ogg`          | A sound: an Ogg Vorbis or WAV file (`.ogg`, `.wav`, any case). |
 
-The first three rows are meshes, the last two textures. Relative paths
+The first three rows are meshes, the next two textures, and the last a
+sound. Relative paths
 are resolved against the project directory (the engine's working
 directory when no project is open). Each source is uploaded to the GPU
 once and shared by every entity that names it.
@@ -119,8 +135,8 @@ once and shared by every entity that names it.
 ## What is saved and what is not
 
 Saving captures every entity that has a transform, in entity id order,
-with its transform, mesh source, colour, texture source, name, and script;
-plus the camera and the light. Nothing else survives a save and load:
+with its transform, mesh source, colour, texture source, name, script,
+and audio source; plus the camera and the light. Nothing else survives a save and load:
 other components, and entities without a transform, are not in the file.
 That is also what [Play and Stop](editor.md#play-pause-stop) in the editor
 restore, because the play snapshot is a scene file in memory.

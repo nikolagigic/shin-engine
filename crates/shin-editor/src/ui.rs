@@ -106,15 +106,18 @@ pub enum Action {
     Pause,
     /// Toolbar Stop: restore the scene from the play snapshot.
     Stop,
+    /// Play the sound at this asset source once, as a preview (GE-036).
+    PreviewSound(String),
 }
 
 impl Action {
     /// Whether this action edits the scene or its history, which is not
-    /// allowed while playing. Console lines and the toolbar are allowed.
+    /// allowed while playing. Console lines, the toolbar, and sound
+    /// previews are allowed.
     pub fn is_edit(&self) -> bool {
         !matches!(
             self,
-            Self::Console(_) | Self::Play | Self::Pause | Self::Stop
+            Self::Console(_) | Self::Play | Self::Pause | Self::Stop | Self::PreviewSound(_)
         )
     }
 }

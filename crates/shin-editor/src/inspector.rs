@@ -1,6 +1,8 @@
 //! The Inspector panel (GE-023): the selected entity's name, transform,
-//! mesh, and colour, editable; and (GE-011) its script path, with the
-//! script's last compile or runtime error.
+//! mesh, and colour, editable; (GE-011) its script path, with the
+//! script's last compile or runtime error; and (GE-036) its sound: source,
+//! a Play button that previews it, volume, and the loop, spatial, and
+//! autoplay flags.
 //!
 //! The panel keeps its own copy of the values being edited, refreshed from
 //! the world every frame except for the field the user is working on.
@@ -12,11 +14,12 @@
 use std::path::Path;
 
 use egui::{DragValue, Ui};
+use shin::audio::AudioSource;
 use shin::ecs::{Entity, Name};
 use shin::headless::Headless;
 use shin::math::Transform;
 use shin::render::{MeshInstance, RenderState};
-use shin::scene::TransformDesc;
+use shin::scene::{AudioDesc, TransformDesc};
 use shin::script::{Script, ScriptEngine};
 
 use crate::edit::entity_id;
@@ -50,6 +53,8 @@ pub enum Edit {
     Mesh(Entity, String),
     /// `script.attach` with a `.rhai` path; empty removes the script.
     Script(Entity, String),
+    /// `entity.set_audio` with the whole sound; `None` removes it (GE-036).
+    Audio(Entity, Option<AudioDesc>),
 }
 
 /// The Inspector's edit buffers.
@@ -63,6 +68,10 @@ pub struct Inspector {
     color: Option<[f32; 4]>,
     mesh: String,
     script: String,
+    /// The sound source field.
+    audio_source: String,
+    /// The volume drag value.
+    audio_volume: f32,
     /// The transform before the preview in progress, if any.
     transform_origin: Option<TransformDesc>,
     /// The colour before the preview in progress, if any.
@@ -73,6 +82,9 @@ pub struct Inspector {
     transform_focused: bool,
     mesh_focused: bool,
     script_focused: bool,
+    audio_source_focused: bool,
+    /// Whether the volume is being dragged or typed in.
+    audio_volume_editing: bool,
 }
 
 /// The values the inspector shows for `entity`, read from the world.
@@ -85,6 +97,8 @@ struct Current {
     script: String,
     /// The script's last error, as `path:line: message`.
     script_error: Option<String>,
+    /// The entity's sound, if any.
+    audio: Option<AudioDesc>,
 }
 
 impl Current {
@@ -116,6 +130,10 @@ impl Current {
                 .map(|t| TransformDesc::from_transform(&t)),
             color: instance.map(|i| i.color),
             mesh,
+            audio: world
+                .get::<&AudioSource>(entity)
+                .ok()
+                .map(|a| AudioDesc::from_source(&a)),
         }
     }
 }
@@ -188,6 +206,7 @@ impl Inspector {
                 self.mesh_row(ui, engine, entity, actions);
                 self.color_row(ui, entity, actions);
                 self.script_row(ui, entity, &current, actions);
+                self.audio_rows(ui, entity, &current, actions);
             });
         if let Some(error) = &current.script_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -221,6 +240,97 @@ impl Inspector {
         if !self.script_focused {
             self.script.clone_from(&current.script);
         }
+        if !self.audio_source_focused {
+            self.audio_source = current
+                .audio
+                .as_ref()
+                .map(|a| a.source.clone())
+                .unwrap_or_default();
+        }
+        if !self.audio_volume_editing {
+            self.audio_volume = current.audio.as_ref().map_or(1.0, |a| a.volume);
+        }
+    }
+
+    /// The Audio rows (GE-036): the sound's source with a Play button that
+    /// previews it, then, for an entity that has a sound, its volume and
+    /// the Loop, Spatial, and Autoplay flags. The source commits on Enter
+    /// or when it loses focus (empty removes the sound), the volume when
+    /// the drag ends, and each flag when clicked.
+    fn audio_rows(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        current: &Current,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.label("Audio");
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.audio_source)
+                    .hint_text("assets/sounds/x.wav")
+                    .desired_width(130.0),
+            );
+            let source = self.audio_source.trim().to_string();
+            let current_source = current.audio.as_ref().map_or("", |a| a.source.as_str());
+            if response.lost_focus() && source != current_source {
+                let audio = (!source.is_empty()).then(|| AudioDesc {
+                    source: source.clone(),
+                    ..current.audio.clone().unwrap_or_default()
+                });
+                actions.push(Action::Edit(Edit::Audio(entity, audio)));
+            }
+            self.audio_source_focused = response.has_focus();
+            let play = ui
+                .add_enabled(!source.is_empty(), egui::Button::new("▶ Play"))
+                .on_hover_text("Preview the sound");
+            if play.clicked() {
+                actions.push(Action::PreviewSound(source));
+            }
+        });
+        ui.end_row();
+
+        let Some(audio) = &current.audio else {
+            return;
+        };
+        ui.label("Volume");
+        let response = ui.add(
+            DragValue::new(&mut self.audio_volume)
+                .speed(0.01)
+                .range(0.0..=4.0)
+                .max_decimals(2)
+                .update_while_editing(false),
+        );
+        self.audio_volume_editing = response.dragged() || response.has_focus();
+        let finished = response.drag_stopped() || response.lost_focus();
+        if finished && self.audio_volume != audio.volume {
+            actions.push(Action::Edit(Edit::Audio(
+                entity,
+                Some(AudioDesc {
+                    volume: self.audio_volume,
+                    ..audio.clone()
+                }),
+            )));
+        }
+        ui.end_row();
+
+        ui.label("");
+        ui.horizontal(|ui| {
+            let mut flags = audio.clone();
+            let mut changed = ui.checkbox(&mut flags.looping, "Loop").changed();
+            changed |= ui
+                .checkbox(&mut flags.spatial, "Spatial")
+                .on_hover_text("Fade with the distance from the camera")
+                .changed();
+            changed |= ui
+                .checkbox(&mut flags.autoplay, "Autoplay")
+                .on_hover_text("Start when Play is pressed")
+                .changed();
+            if changed {
+                actions.push(Action::Edit(Edit::Audio(entity, Some(flags))));
+            }
+        });
+        ui.end_row();
     }
 
     /// The script path field: commits on Enter or when it loses focus, if

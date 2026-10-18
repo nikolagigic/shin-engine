@@ -106,8 +106,14 @@ changes the entity, as does `entity.transform.translation.y = 1.0`.
 | Function | Meaning |
 |----------|---------|
 | `time()` | Simulated seconds since play started. |
+| `play_sound(path)` | Plays an `.ogg` or `.wav` file (relative to the project) once, everywhere, at full volume. See [Audio](audio.md). |
+| `play_sound_at(entity, path)` | Plays the file once at `entity`: it fades with the distance from the camera and follows the entity. |
 | `print(x)` | Writes `script: x` to the engine log at info level (the editor's Log panel). |
 | `debug(x)` | Writes to the log at debug level. |
+
+Sounds a script asks for start after every script has run for that
+step. A sound that cannot be loaded (a wrong path, say) is logged as a
+warning and does not stop the script.
 
 Scripts cannot spawn entities, reach other entities, or call other
 scripts. The `script.eval` tool evaluates a Rhai expression with the same

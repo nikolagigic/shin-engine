@@ -326,6 +326,10 @@ impl EditorCore {
             Action::Edit(Edit::Mesh(entity, source)) => {
                 edit::commit_mesh(reg, engine, entity, &source)?;
             }
+            Action::Edit(Edit::Audio(entity, audio)) => {
+                edit::commit_audio(reg, engine, entity, audio.as_ref())?;
+            }
+            Action::PreviewSound(source) => edit::preview_sound(reg, engine, &source)?,
             Action::Edit(Edit::Script(entity, path)) => {
                 // A compile error is logged by the engine and shown in the
                 // inspector; the script stays attached.
@@ -511,9 +515,8 @@ fn spawn_name(source: &str) -> Option<String> {
         AssetSource::Builtin(name) => Some(name),
         AssetSource::File { path, .. }
         | AssetSource::Image { path }
-        | AssetSource::GltfImage { path, .. } => {
-            Some(path.file_stem()?.to_string_lossy().into_owned())
-        }
+        | AssetSource::GltfImage { path, .. }
+        | AssetSource::Audio { path } => Some(path.file_stem()?.to_string_lossy().into_owned()),
     }
 }
 

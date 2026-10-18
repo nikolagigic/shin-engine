@@ -524,7 +524,8 @@ what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 shin.toml       project name, window settings, and entry scene
 src/main.rs     the game: systems, tools, window and --mcp modes
 scenes/         scene files (.scene.ron)
-assets/         glTF meshes and textures
+assets/         glTF meshes, textures, and sounds (.ogg, .wav)
+scripts/        Rhai scripts (the moon's blips once per revolution)
 .mcp.json       runs the game with --mcp for agents
 ```
 "#

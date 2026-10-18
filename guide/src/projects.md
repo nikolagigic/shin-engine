@@ -26,6 +26,8 @@ mygame/
   scenes/main.scene.ron   the starter scene (the entry scene)
   assets/cube.gltf        the cube mesh the starter scene draws
   assets/cube.bin         its vertex buffer
+  assets/sounds/blip.wav  a 0.2 s blip the moon plays once per revolution
+  scripts/moon.rhai       the moon's script, which plays the blip
   .mcp.json               runs the game with --mcp for agents
   .gitignore              ignores /target
   README.md               how to run, drive, and extend the game
@@ -101,8 +103,9 @@ cargo run -- --mcp   serve this game to an agent over MCP (stdio)
 ```
 
 Both modes build the same world, systems, and resources: an `orbit`
-system that moves the entity named `moon` on a circle around the cube, a
-camera with a 60° field of view (the scene file says where it is), and one
+system that moves the entity named `moon` on a circle around the cube,
+the engine's script and audio systems (so the moon's script runs and its
+blip fades with distance), a camera with a 60° field of view (the scene file says where it is), and one
 project-defined tool, `game.hello`. Whatever an agent sees under `--mcp`
 is the game itself. [Agents and MCP](agents-mcp.md) covers that mode and
 how to add tools; the full file is below.
@@ -122,7 +125,10 @@ resting on it and turned 30° about Y, and a small `moon` beside the cube
 at (1.6, 0.5, 0), where the orbit system puts it at time zero. The camera
 sits at (0, 2, 5) looking at (0, 0.5, 0), and a warm directional light
 comes from above and in front. All three entities draw
-`assets/cube.gltf`. [Scenes](scenes.md) explains the format.
+`assets/cube.gltf`. The moon also carries `assets/sounds/blip.wav` as a
+spatial audio source and runs `scripts/moon.rhai`, which plays the blip
+each time the moon completes a revolution; see [Audio](audio.md).
+[Scenes](scenes.md) explains the format.
 
 ## Project tools
 
