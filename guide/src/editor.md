@@ -24,10 +24,10 @@ The window opens at 1600 × 900 with seven docked panels:
 
 | Panel         | Where      | Shows |
 |---------------|------------|-------|
-| **Viewport**  | centre     | The scene, rendered live. The selected entity is drawn with its colour mixed halfway toward white. |
+| **Viewport**  | centre     | The scene, rendered live from the editor's orbit camera (from the scene's own camera while playing). The selected entity is drawn with its colour mixed halfway toward white. |
 | **Scene**     | left, top  | Every entity that has a transform, in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
 | **Assets**    | left, bottom | The project's meshes, textures, scenes, and scripts, with a button per entry to use it, and an Import row. |
-| **Inspector** | right, top | The selected entity's properties, editable. |
+| **Inspector** | right, top | The selected entity's properties, editable, and the scene camera. |
 | **History**   | right, bottom | The command history: undoable edits oldest first as `tool {args}`, then undone edits greyed out. |
 | **Log**       | bottom, left | The engine's log lines, newest at the bottom. |
 | **Console**   | bottom, right | A one-line prompt that runs tools. |
@@ -50,10 +50,14 @@ cube resting on y = 0.
   0.1 and 500 units from the target.
 
 Drags only count when they start on the viewport, so dragging a panel's
-widgets never moves the camera. The scene file's camera position is not
-used for the editor view; the orbit camera is written into the engine's
-camera every frame, keeping the field of view the scene set, which also
-means **Save writes the current editor view as the scene's camera**.
+widgets never moves the camera.
+
+The orbit camera is the editor's own. The scene's camera, the one the
+scene file holds and the game starts from, is left exactly as authored
+while you orbit: it is only swapped out for the viewport render, and it
+keeps the field of view. **Save never writes the editor view into the
+scene.** To look through the scene camera, or to make it match the
+viewport, use the Inspector's [Scene camera](#scene-camera) buttons.
 
 ## Selecting
 
@@ -77,6 +81,23 @@ The Inspector shows `Entity #<id>` and these rows for the selected entity:
 Values are refreshed from the world every frame except for the field you
 are typing in. Every commit is one entry in the History panel, so a drag
 of any length undoes in one step.
+
+### Scene camera
+
+Below the entity rows, whether or not something is selected, the
+Inspector shows **Scene camera**: the scene's own camera, read-only, as
+its position, the direction it looks, and its vertical field of view.
+This is the camera Save writes and Play renders through, not the
+viewport's orbit camera. Two buttons move one to the other:
+
+- **View from scene camera** moves the orbit camera to where the scene
+  camera is, facing the same way, so the viewport shows what the game
+  would. The orbit target becomes the point on that view nearest the
+  previous target, at least one unit ahead. This is not an edit.
+- **Set scene camera from view** moves the scene camera to the viewport
+  camera, aimed at the orbit target and keeping its field of view, with
+  one recorded `camera.set`. It appears in the History panel, Ctrl+Z
+  reverts it, and the scene is marked unsaved until you save.
 
 ## Adding and deleting entities
 
@@ -217,7 +238,8 @@ The toolbar at the end of the menu bar has **Play**, **Pause**,
   and the simulation clock) and starts stepping the simulation at the
   engine's fixed step of 1/60 s, from wall-clock frame times. Entities'
   Rhai scripts run every step. While playing, the Play button is shown
-  selected.
+  selected and the viewport renders from the scene camera, as the game
+  would; Stop returns to the orbit camera's view.
 - **Pause** suspends stepping; click it again (or Play) to resume. No time
   builds up while paused.
 - **Stop** restores the scene exactly as it was at Play: every entity

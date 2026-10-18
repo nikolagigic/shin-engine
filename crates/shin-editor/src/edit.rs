@@ -187,6 +187,24 @@ pub fn commit_script(
     Ok(out["error"].as_str().map(str::to_string))
 }
 
+/// Moves the scene's camera to `position`, aimed at `look_at` with +Y up
+/// and keeping its field of view, with one recorded `camera.set` (GE-030:
+/// the Inspector's "Set scene camera from view").
+pub fn commit_camera(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    position: Vec3,
+    look_at: Vec3,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "camera.set",
+        json!({ "position": position.to_array(), "look_at": look_at.to_array() }),
+    )?;
+    Ok(())
+}
+
 /// Writes `desc` into `entity`'s [`Transform`] without recording it.
 /// Does nothing if the entity has no transform.
 pub fn preview_transform(engine: &mut Headless, entity: Entity, desc: &TransformDesc) {
@@ -208,6 +226,7 @@ mod tests {
     use super::*;
     use shin::command::History;
     use shin::ecs::Name;
+    use shin::math::{Camera, Projection};
 
     fn setup() -> anyhow::Result<(ToolRegistry, Headless, Entity)> {
         let reg = ToolRegistry::with_engine_tools();
@@ -347,6 +366,41 @@ mod tests {
         assert_eq!(instance(&engine, entity).color, [1.0; 4]);
         command::redo(&mut engine)?;
         assert_eq!(instance(&engine, entity).color, [0.0, 1.0, 0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_camera_undo_redo_keeps_the_fov() -> anyhow::Result<()> {
+        let (reg, mut engine, _) = setup()?;
+        let before = *engine.resources.expect::<Camera>();
+        let Projection::Perspective { fov_y_radians, .. } = before.projection else {
+            panic!("the default camera is perspective");
+        };
+        commit_camera(
+            &reg,
+            &mut engine,
+            Vec3::new(3.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        )?;
+        let after = *engine.resources.expect::<Camera>();
+        assert_eq!(after.transform.translation, Vec3::new(3.0, 1.0, 0.0));
+        assert!(after.transform.forward().distance(Vec3::NEG_X) < 1e-5);
+        assert!(
+            matches!(after.projection, Projection::Perspective { fov_y_radians: f, .. } if f == fov_y_radians),
+            "{:?}",
+            after.projection
+        );
+        assert_eq!(undo_len(&engine), 2);
+        command::undo(&mut engine)?;
+        assert_eq!(
+            engine.resources.expect::<Camera>().transform,
+            before.transform
+        );
+        command::redo(&mut engine)?;
+        assert_eq!(
+            engine.resources.expect::<Camera>().transform,
+            after.transform
+        );
         Ok(())
     }
 

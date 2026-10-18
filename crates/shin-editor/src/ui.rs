@@ -5,9 +5,11 @@
 //! The Viewport shows the scene texture and turns pointer input into
 //! orbit-camera moves. The Scene panel lists entities (click to select) and
 //! adds and deletes them; the Inspector ([`crate::inspector`]) edits the
-//! selected one; the Assets panel ([`crate::assets`]) lists the project's
-//! files and uses them. Edits are not made here: the UI pushes [`Action`]s
-//! that [`crate::editor::EditorCore`] runs after the UI pass.
+//! selected one and shows the scene's own camera, with buttons to move the
+//! viewport camera to it and to set it from the viewport (GE-030); the
+//! Assets panel ([`crate::assets`]) lists the project's files and uses
+//! them. Edits are not made here: the UI pushes [`Action`]s that
+//! [`crate::editor::EditorCore`] runs after the UI pass.
 //!
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
 //! undoes and Ctrl+Shift+Z redoes (also in an empty console), Delete or
@@ -119,16 +121,27 @@ pub enum Action {
     Pause,
     /// Toolbar Stop: restore the scene from the play snapshot.
     Stop,
+    /// Inspector "View from scene camera": move the viewport's orbit camera
+    /// to the scene camera's placement. Not an edit.
+    ViewFromSceneCamera,
+    /// Inspector "Set scene camera from view": record one `camera.set` that
+    /// moves the scene camera to the viewport's orbit camera.
+    SetSceneCameraFromView,
 }
 
 impl Action {
     /// Whether this action edits the scene or its history, which is not
-    /// allowed while playing. Console lines, the toolbar, and Import
-    /// (which only copies a file) are allowed.
+    /// allowed while playing. Console lines, the toolbar, Import (which
+    /// only copies a file), and View from scene camera are allowed.
     pub fn is_edit(&self) -> bool {
         !matches!(
             self,
-            Self::Console(_) | Self::Import(_) | Self::Play | Self::Pause | Self::Stop
+            Self::Console(_)
+                | Self::Import(_)
+                | Self::Play
+                | Self::Pause
+                | Self::Stop
+                | Self::ViewFromSceneCamera
         )
     }
 }
@@ -595,6 +608,8 @@ impl TabViewer for EditorUi<'_> {
                 ui.add_enabled_ui(editing, |ui| {
                     self.inspector
                         .ui(ui, self.engine, self.selection.0, self.actions);
+                    ui.separator();
+                    crate::inspector::scene_camera_ui(ui, self.engine, self.actions);
                 });
             }
             Tab::Log => self.log_ui(ui),

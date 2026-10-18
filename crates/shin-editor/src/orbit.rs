@@ -1,10 +1,13 @@
 //! The editor's orbit camera: left-drag orbits around a target point,
 //! right-drag pans the target, the wheel zooms.
 //!
-//! [`OrbitCamera`] holds only the orbit parameters; [`OrbitCamera::apply`]
-//! writes the resulting placement into the engine's [`Camera`] resource.
+//! [`OrbitCamera`] holds only the orbit parameters; [`OrbitCamera::transform`]
+//! is the resulting placement, which the editor swaps into the scene's
+//! camera only for the viewport render, and [`OrbitCamera::look_from`]
+//! takes a camera's placement back into orbit parameters (GE-030: the
+//! scene's camera and this one stay apart and convert on request).
 
-use shin::math::{Camera, Quat, Transform, Vec2, Vec3};
+use shin::math::{Quat, Transform, Vec2, Vec3};
 
 /// Radians of yaw or pitch per point of mouse drag.
 const ORBIT_SPEED: f32 = 0.008;
@@ -20,6 +23,10 @@ const MAX_PITCH: f32 = 89f32.to_radians();
 const MIN_DISTANCE: f32 = 0.1;
 /// Farthest the camera may get from its target.
 const MAX_DISTANCE: f32 = 500.0;
+/// How far ahead of a camera [`OrbitCamera::look_from`] puts the target at
+/// least, so a camera looking away from the old target still orbits
+/// something in front of it (the same floor a scene file's `look_at` uses).
+const MIN_LOOK_FROM_DISTANCE: f32 = 1.0;
 
 /// A camera circling `target` at `distance`, described by yaw and pitch.
 ///
@@ -87,9 +94,24 @@ impl OrbitCamera {
             (self.distance * (-scroll * ZOOM_SPEED).exp()).clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
 
-    /// Moves `camera` to this orbit's placement, keeping its projection.
-    pub fn apply(&self, camera: &mut Camera) {
-        camera.transform = self.transform();
+    /// Moves this orbit so its camera stands where `placement` is and faces
+    /// the same way (its scale is ignored). The new target is the point on
+    /// the view ray nearest the old target, at least one unit ahead, so
+    /// orbiting afterwards circles what the camera was looking at. A view
+    /// straight up or down is clamped to ±89° of pitch like a drag.
+    pub fn look_from(&mut self, placement: &Transform) {
+        let position = placement.translation;
+        let forward = placement.forward();
+        self.pitch = forward
+            .y
+            .clamp(-1.0, 1.0)
+            .asin()
+            .clamp(-MAX_PITCH, MAX_PITCH);
+        self.yaw = (-forward.x).atan2(-forward.z);
+        self.distance = (self.target - position)
+            .dot(forward)
+            .clamp(MIN_LOOK_FROM_DISTANCE, MAX_DISTANCE);
+        self.target = position + forward * self.distance;
     }
 }
 
@@ -178,17 +200,54 @@ mod tests {
     }
 
     #[test]
-    fn apply_sets_the_camera_transform() {
-        let orbit = OrbitCamera::default();
-        let mut camera = Camera {
-            transform: Transform::IDENTITY,
-            projection: shin::math::Projection::Perspective {
-                fov_y_radians: 1.0,
-                near: 0.1,
-                far: 10.0,
-            },
+    fn look_from_round_trips_the_placement() {
+        let from = OrbitCamera {
+            target: Vec3::new(1.0, 2.0, -3.0),
+            yaw: 2.5,
+            pitch: -0.7,
+            distance: 4.0,
         };
-        orbit.apply(&mut camera);
-        assert_eq!(camera.transform, orbit.transform());
+        let placement = from.transform();
+        let mut orbit = OrbitCamera::default();
+        orbit.look_from(&placement);
+        let back = orbit.transform();
+        assert!(close(back.translation, placement.translation), "{back:?}");
+        assert!(close(back.forward(), placement.forward()), "{back:?}");
+        // The target is where the view ray passes nearest the old target
+        // (0, 0.5, 0), not the original orbit's target.
+        let to_target = orbit.target - placement.translation;
+        assert!(close(to_target.normalize(), placement.forward()));
+        assert!(
+            (orbit.target - OrbitCamera::default().target)
+                .dot(placement.forward())
+                .abs()
+                < 1e-4,
+            "nearest point on the ray"
+        );
+    }
+
+    #[test]
+    fn look_from_the_starter_camera_targets_the_cube() {
+        // The starter scene's camera: at (0, 2, 5) looking at (0, 0.5, 0),
+        // which is the default orbit target, so it is kept.
+        let mut placement = Transform::from_translation(Vec3::new(0.0, 2.0, 5.0));
+        placement.looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
+        let mut orbit = OrbitCamera::default();
+        orbit.look_from(&placement);
+        assert!(close(orbit.target, Vec3::new(0.0, 0.5, 0.0)), "{orbit:?}");
+        assert!(close(orbit.transform().translation, placement.translation));
+        assert!(orbit.pitch < 0.0, "looking down");
+    }
+
+    #[test]
+    fn look_from_keeps_at_least_one_unit_ahead() {
+        // Facing away from the old target: the target moves in front.
+        let mut placement = Transform::from_translation(Vec3::new(0.0, 0.5, -5.0));
+        placement.looking_at(Vec3::new(0.0, 0.5, -10.0), Vec3::Y);
+        let mut orbit = OrbitCamera::default();
+        orbit.look_from(&placement);
+        assert_eq!(orbit.distance, MIN_LOOK_FROM_DISTANCE);
+        assert!(close(orbit.target, Vec3::new(0.0, 0.5, -6.0)), "{orbit:?}");
+        assert!(close(orbit.transform().translation, placement.translation));
     }
 }
