@@ -3,7 +3,11 @@
 //! and History (right), and Log and Console (below the viewport).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
-//! orbit-camera moves. The Scene panel shows entities as a collapsible tree
+//! orbit-camera moves; a click selects the entity under the pointer and
+//! clicking empty space clears the selection ([`crate::pick`], GE-035).
+//! While editing, the selection carries a transform gizmo
+//! ([`crate::gizmo`]): dragging a handle moves, rotates, or scales it, as
+//! one undoable edit, and Ctrl snaps. The Scene panel shows entities as a collapsible tree
 //! (GE-031; click to select, drag a row onto another to reparent, drop it
 //! below the tree or use the right-click menu to unparent) and adds and
 //! deletes them; "+" adds a child of the selection when there is one. The
@@ -17,9 +21,11 @@
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
 //! undoes and Ctrl+Shift+Z redoes (also in an empty console), Delete or
 //! Backspace deletes the selected entity, and Escape clears the selection.
+//! With the pointer over the viewport, W, E, and R pick the gizmo's Move,
+//! Rotate, and Scale handles.
 //!
 //! The menu bar ends in the play toolbar (GE-024): Play, Pause, Stop, and
-//! the simulated time. While playing, editing is disabled: the Inspector,
+//! the simulated time, then the gizmo modes. While playing, editing is disabled: the Inspector,
 //! the Scene panel's add and delete controls, undo and redo, the Delete
 //! key, and File > Open and Save are greyed out or ignored (entities can
 //! still be selected).
@@ -42,9 +48,11 @@ use shin::scene::TransformDesc;
 
 use crate::assets::AssetBrowser;
 use crate::edit::entity_id;
+use crate::gizmo::{self, Mode, Pointer, TransformGizmo};
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
+use crate::pick;
 
 /// One dockable panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -233,6 +241,9 @@ pub struct Viewport {
     /// pass; the offscreen target is resized to match. Zero before the
     /// panel has been laid out.
     pub size_px: [u32; 2],
+    /// The panel's area in screen points during the last UI pass, which
+    /// pointer positions are measured against; `None` before layout.
+    pub rect: Option<Rect>,
 }
 
 /// Text typed into fields that outlive one frame: the Scene panel's asset
@@ -260,6 +271,8 @@ pub struct EditorUi<'a> {
     pub console: &'a mut Console,
     /// The selected entity.
     pub selection: &'a mut Selection,
+    /// The viewport's transform gizmo (GE-035).
+    pub gizmo: &'a mut TransformGizmo,
     /// The Inspector's edit buffers.
     pub inspector: &'a mut Inspector,
     /// The Assets panel's entries and fields.
@@ -355,6 +368,21 @@ impl EditorUi<'_> {
         let time = self.engine.play_time().unwrap_or(0.0);
         ui.label(egui::RichText::new(format!("{time:.2} s")).monospace())
             .on_hover_text("Simulated time since Play");
+        ui.separator();
+        for mode in Mode::ALL {
+            let button = egui::Button::new(mode.label()).selected(self.gizmo.mode == mode);
+            if ui
+                .add_enabled(!playing, button)
+                .on_hover_text(format!(
+                    "{} the selection with the viewport gizmo ({:?}; hold Ctrl to snap)",
+                    mode.label(),
+                    mode.key()
+                ))
+                .clicked()
+            {
+                self.gizmo.mode = mode;
+            }
+        }
     }
 
     /// File > Open, Save, Save As, Quit. All but Quit are disabled while
@@ -437,6 +465,9 @@ impl EditorUi<'_> {
         }
     }
 
+    /// The scene image, the selection's gizmo over it, and pointer input:
+    /// a drag on a gizmo handle edits the selection, other left drags
+    /// orbit, right drags pan, the wheel zooms, and a click picks.
     fn viewport_ui(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -445,17 +476,56 @@ impl EditorUi<'_> {
             (rect.width() * ppp).round().max(0.0) as u32,
             (rect.height() * ppp).round().max(0.0) as u32,
         ];
+        self.viewport.rect = Some(rect);
         if let Some(texture) = self.viewport.texture {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             ui.painter().image(texture, rect, uv, Color32::WHITE);
         }
+        // The image shows the camera as it was before this frame's input.
+        let camera = pick::viewport_camera(self.engine, self.orbit);
+        let editing = !self.engine.play_state().is_playing();
 
-        // Drags only count when they started on the viewport, and hover is
-        // false while a menu, popup, or another panel is under the pointer,
-        // so panel interaction never moves the camera.
+        // Hover is false while a menu, popup, or another panel is under
+        // the pointer, so panel interaction never reaches the scene.
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if editing && response.hovered() && !typing {
+            for mode in Mode::ALL {
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, mode.key())) {
+                    self.gizmo.mode = mode;
+                }
+            }
+        }
+        let had_pointer = self.gizmo.has_pointer();
+        if let Some(camera) = &camera {
+            let (pointer, snap) = ui.input(|i| {
+                let pointer = Pointer {
+                    pos: i.pointer.latest_pos(),
+                    over_viewport: response.hovered(),
+                    pressed: i.pointer.primary_pressed(),
+                    down: i.pointer.primary_down(),
+                };
+                (pointer, i.modifiers.ctrl || i.modifiers.command)
+            });
+            let selected = self.selection.0.filter(|_| editing);
+            if let Some(draw) = self.gizmo.update(
+                self.engine,
+                selected,
+                camera,
+                rect,
+                ppp,
+                pointer,
+                snap,
+                self.actions,
+            ) {
+                gizmo::paint(&ui.painter_at(rect), draw);
+            }
+        }
+        // A press on a handle belongs to the gizmo until it is released.
+        let gizmo_owns_pointer = had_pointer || self.gizmo.has_pointer();
+
         let drag = response.drag_delta();
         let drag = Vec2::new(drag.x, drag.y);
-        if response.dragged_by(PointerButton::Primary) {
+        if response.dragged_by(PointerButton::Primary) && !gizmo_owns_pointer {
             self.orbit.orbit(drag);
         } else if response.dragged_by(PointerButton::Secondary) {
             self.orbit.pan(drag);
@@ -465,6 +535,19 @@ impl EditorUi<'_> {
             if scroll != 0.0 {
                 self.orbit.zoom(scroll);
             }
+        }
+        if response.clicked_by(PointerButton::Primary)
+            && !gizmo_owns_pointer
+            && let (Some(camera), Some(pos)) = (&camera, response.interact_pointer_pos())
+        {
+            let ndc = pick::ndc(
+                [
+                    Vec2::new(rect.min.x, rect.min.y),
+                    Vec2::new(rect.max.x, rect.max.y),
+                ],
+                Vec2::new(pos.x, pos.y),
+            );
+            self.selection.0 = pick::pick_at(self.engine, camera, rect.aspect_ratio(), ndc);
         }
     }
 

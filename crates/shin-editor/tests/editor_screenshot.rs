@@ -127,3 +127,58 @@ fn missing_project_fails_with_the_manifest_path() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("shin.toml"), "stderr: {stderr}");
 }
+
+/// Pixels of the viewport that are clearly green: the gizmo's Y handle
+/// and plane handles. Nothing in the starter scene is green.
+fn green_pixels(image: &RgbaImage) -> usize {
+    crop(image, 0.25, 0.15, 800, 450)
+        .pixels()
+        .filter(|p| {
+            let [r, g, b, _] = p.0.map(i32::from);
+            g > r + 60 && g > b + 30
+        })
+        .count()
+}
+
+/// GE-035: `--select <name>` screenshots show the selection's gizmo
+/// (the guide's `images/editor-gizmo.png` is made this way); an unknown
+/// name fails.
+#[test]
+fn screenshot_with_a_selection_shows_its_gizmo() -> anyhow::Result<()> {
+    let root = temp_dir("gizmo");
+    let project_dir = root.join("demo");
+    project::create(&NewProjectOptions {
+        name: "demo".to_string(),
+        dir: project_dir.clone(),
+        engine: Default::default(),
+    })?;
+    let shoot = |png: &PathBuf, select: Option<&str>| -> anyhow::Result<std::process::Output> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_shin-editor"));
+        command.arg(&project_dir).arg("--screenshot").arg(png);
+        if let Some(name) = select {
+            command.arg("--select").arg(name);
+        }
+        Ok(command.output()?)
+    };
+    let plain = root.join("plain.png");
+    let selected = root.join("selected.png");
+    assert!(shoot(&plain, None)?.status.success());
+    let output = shoot(&selected, Some("cube"))?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let without = green_pixels(&image::open(&plain)?.to_rgba8());
+    let with = green_pixels(&image::open(&selected)?.to_rgba8());
+    assert_eq!(without, 0, "no gizmo without a selection");
+    assert!(with > 50, "the gizmo's green handles show ({with} pixels)");
+
+    let output = shoot(&root.join("none.png"), Some("no-such-entity"))?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no-such-entity"), "stderr: {stderr}");
+
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

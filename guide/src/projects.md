@@ -32,6 +32,8 @@ mygame/
   .mcp.json               runs the game with --mcp for agents
   .gitignore              ignores /target
   README.md               how to run, drive, and extend the game
+  CLAUDE.md               project notes for agents
+  .claude/skills/*/SKILL.md  the agent skills, one folder each
 ```
 
 Relative asset and scene paths are resolved against the project
@@ -196,6 +198,25 @@ The cube runs `scripts/player.rhai`. The arrow keys or the left stick
 slide it over the ground (`move_x`, `move_z`), and holding Space or the
 gamepad's south button lifts it (`jump`). Let go and it settles back.
 WASD stays on the fly camera.
+
+## Files for agents
+
+`shin new` writes two things for AI agents, in addition to `.mcp.json`:
+
+- **`CLAUDE.md`**, about 40 lines that Claude Code reads at the start of
+  every session in the folder: what the project is, how to run it, the
+  `shin` MCP server from `.mcp.json`, where scenes, scripts, and assets
+  live, and how to add a game tool, with a link to this guide.
+- **`.claude/skills/<name>/SKILL.md`** for each of the
+  [agent skills](agents-skills.md): `shin-scene-building`,
+  `shin-visual-debugging`, `shin-scripting`, and `shin-project`. Claude
+  Code discovers project skills in that folder and uses one when a task
+  matches its description. Other MCP clients get the same skills as
+  prompts from the server.
+
+They are plain files: edit them to describe your game, or add skills of
+your own next to them. A newer engine does not rewrite them; compare with
+the engine's `skills/` folder when you upgrade.
 
 ## Project tools
 

@@ -33,6 +33,10 @@
 //!
 //! Tools (GE-015): [`register_tools`] adds `mesh.list`, `camera.set`,
 //! `light.set`, and `render.frame`.
+//!
+//! Bounds (GE-035): every [`GpuMesh`] keeps the object-space [`Aabb`] of
+//! its vertices, read with [`MeshRegistry::bounds`]; the editor picks
+//! entities with it.
 
 mod tools;
 
@@ -44,7 +48,7 @@ use wgpu::util::DeviceExt as _;
 use crate::asset::{AssetSource, ImageData, MeshData, Vertex};
 use crate::ecs::{GlobalTransform, Resources, World};
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
-use crate::math::{Camera, Mat3, Transform};
+use crate::math::{Camera, Mat3, Transform, Vec3};
 
 pub use tools::register_tools;
 
@@ -60,6 +64,46 @@ pub struct GpuMesh {
     pub vertex_count: u32,
     /// Name of the [`MeshData`] this was uploaded from (may be empty).
     pub name: String,
+    /// Object-space bounds of the vertices.
+    pub bounds: Aabb,
+}
+
+/// An axis-aligned box, `min` to `max` on every axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aabb {
+    /// The corner with the smallest coordinates.
+    pub min: Vec3,
+    /// The corner with the largest coordinates.
+    pub max: Vec3,
+}
+
+impl Aabb {
+    /// The smallest box holding every point; a zero-sized box at the
+    /// origin when there are none.
+    pub fn from_points(points: impl IntoIterator<Item = Vec3>) -> Self {
+        let mut points = points.into_iter();
+        let Some(first) = points.next() else {
+            return Self {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            };
+        };
+        points.fold(
+            Self {
+                min: first,
+                max: first,
+            },
+            |b, p| Self {
+                min: b.min.min(p),
+                max: b.max.max(p),
+            },
+        )
+    }
+
+    /// The box around `mesh`'s vertex positions.
+    pub fn of_mesh(mesh: &MeshData) -> Self {
+        Self::from_points(mesh.vertices.iter().map(|v| Vec3::from(v.position)))
+    }
 }
 
 impl GpuMesh {
@@ -82,6 +126,7 @@ impl GpuMesh {
             index_count: mesh.indices.len() as u32,
             vertex_count: mesh.vertices.len() as u32,
             name: mesh.name.clone(),
+            bounds: Aabb::of_mesh(mesh),
         }
     }
 }
@@ -726,6 +771,12 @@ impl MeshRegistry {
         (h.0 as usize) < self.meshes.len()
     }
 
+    /// The object-space bounds of the mesh behind `h` (GE-035); `None` for
+    /// unknown handles.
+    pub fn bounds(&self, h: MeshHandle) -> Option<Aabb> {
+        self.meshes.get(h.0 as usize).map(|mesh| mesh.bounds)
+    }
+
     /// Number of meshes added so far.
     pub fn len(&self) -> usize {
         self.meshes.len()
@@ -980,6 +1031,16 @@ mod tests {
     use super::*;
     use crate::gpu::{OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
     use crate::math::{Projection, Quat, Vec3};
+
+    #[test]
+    fn mesh_bounds_hold_every_vertex() {
+        let cube = crate::asset::cube();
+        let bounds = Aabb::of_mesh(&cube);
+        assert_eq!(bounds.min, Vec3::splat(-0.5));
+        assert_eq!(bounds.max, Vec3::splat(0.5));
+        let empty = Aabb::from_points([]);
+        assert_eq!((empty.min, empty.max), (Vec3::ZERO, Vec3::ZERO));
+    }
 
     #[test]
     fn layouts_match_struct_sizes() {
