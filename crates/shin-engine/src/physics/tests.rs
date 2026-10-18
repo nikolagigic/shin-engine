@@ -66,7 +66,10 @@ fn dynamic_cube_settles_on_fixed_ground() {
         (settled.y - 0.5).abs() <= 0.01,
         "the cube rests on the ground: {settled}"
     );
-    assert!(settled.with_y(0.0).length() < 0.01, "and straight down: {settled}");
+    assert!(
+        settled.with_y(0.0).length() < 0.01,
+        "and straight down: {settled}"
+    );
     assert_eq!(res.expect::<PhysicsWorld>().len(), 2);
 }
 
@@ -166,7 +169,9 @@ fn component_changes_rebuild_the_body() {
     let y = translation(&world, cube).y;
     assert!(y < 5.0);
 
-    world.insert_one(cube, RigidBody::new(BodyKind::Fixed)).unwrap();
+    world
+        .insert_one(cube, RigidBody::new(BodyKind::Fixed))
+        .unwrap();
     run(&mut world, &mut res, 10);
     assert_eq!(translation(&world, cube).y, y, "fixed bodies do not move");
 
@@ -205,7 +210,11 @@ fn physics_follows_the_play_state() -> anyhow::Result<()> {
         cuboid(0.5),
     ));
     engine.step(10);
-    assert_eq!(translation(&engine.world, cube).y, 5.0, "editing: no physics");
+    assert_eq!(
+        translation(&engine.world, cube).y,
+        5.0,
+        "editing: no physics"
+    );
 
     engine.play()?;
     engine.step(10);
@@ -281,7 +290,11 @@ fn raycast_hits_the_right_entity() -> anyhow::Result<()> {
 #[test]
 fn shapes_validate_and_scale() {
     assert!(ColliderShape::Ball(0.0).validate().is_err());
-    assert!(ColliderShape::Cuboid(Vec3::new(1.0, -1.0, 1.0)).validate().is_err());
+    assert!(
+        ColliderShape::Cuboid(Vec3::new(1.0, -1.0, 1.0))
+            .validate()
+            .is_err()
+    );
     assert!(
         ColliderShape::Capsule {
             half_height: 0.5,
@@ -298,12 +311,14 @@ fn shapes_validate_and_scale() {
         .validate()
         .is_err()
     );
-    assert!(RigidBody {
-        kind: BodyKind::Dynamic,
-        mass: 0.0
-    }
-    .validate()
-    .is_err());
+    assert!(
+        RigidBody {
+            kind: BodyKind::Dynamic,
+            mass: 0.0
+        }
+        .validate()
+        .is_err()
+    );
 
     let scale = Vec3::new(2.0, 3.0, -4.0);
     assert_eq!(
@@ -323,7 +338,9 @@ fn shapes_validate_and_scale() {
     );
     assert_eq!(capsule.extents(), Vec3::new(1.0, 3.0, 1.0));
     assert_eq!(
-        ColliderShape::Cuboid(Vec3::splat(0.5)).scaled(scale).extents(),
+        ColliderShape::Cuboid(Vec3::splat(0.5))
+            .scaled(scale)
+            .extents(),
         Vec3::new(2.0, 3.0, 4.0)
     );
 }

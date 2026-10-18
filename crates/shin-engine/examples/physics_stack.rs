@@ -48,7 +48,12 @@ pub fn camera() -> Camera {
 
 /// Builds the [`RenderState`] for colour targets of `format` and spawns
 /// the ground (top face at y = 0) and the crates, hanging apart above it.
-pub fn setup(world: &mut World, res: &mut Resources, ctx: &GpuContext, format: wgpu::TextureFormat) {
+pub fn setup(
+    world: &mut World,
+    res: &mut Resources,
+    ctx: &GpuContext,
+    format: wgpu::TextureFormat,
+) {
     let mut state = RenderState::new(&ctx.device, &ctx.queue, format);
     state.light = LightUniform {
         direction: [-1.0, -2.0, -1.5, 0.0],

@@ -323,9 +323,12 @@ impl InstanceRaw {
     };
 }
 
-/// Draws lit, instanced, optionally textured meshes with one pipeline.
+/// Draws lit, instanced, optionally textured meshes with one pipeline
+/// (plus a translucent variant for [`render_overlay`]).
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// The same shader alpha-blended, depth-tested without depth writes.
+    overlay_pipeline: wgpu::RenderPipeline,
     /// Texture layout and sampler, shared with every [`TextureRegistry`]
     /// made from this renderer.
     binder: TextureBinder,
@@ -429,46 +432,55 @@ impl MeshRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(VERTEX_LAYOUT), Some(InstanceRaw::LAYOUT)],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = |label, blend, depth_write| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(VERTEX_LAYOUT), Some(InstanceRaw::LAYOUT)],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let overlay_pipeline = pipeline(
+            "mesh overlay pipeline",
+            wgpu::BlendState::ALPHA_BLENDING,
+            false,
+        );
+        let pipeline = pipeline("mesh pipeline", wgpu::BlendState::REPLACE, true);
 
         let instance_cap = 1;
         Self {
             pipeline,
+            overlay_pipeline,
             binder,
             white,
             camera_buf,
@@ -554,6 +566,32 @@ impl MeshRenderer {
         if instances.is_empty() {
             return;
         }
+        self.encode(pass, &self.pipeline, mesh, texture, instances);
+    }
+
+    /// [`Self::draw`] with the translucent overlay pipeline: alpha-blended
+    /// by each instance colour's alpha, depth-tested but not written.
+    pub fn draw_overlay(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: &GpuMesh,
+        instances: Range<u32>,
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        self.encode(pass, &self.overlay_pipeline, mesh, &self.white, instances);
+    }
+
+    /// Records one instanced draw of `mesh` with `pipeline`.
+    fn encode(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        mesh: &GpuMesh,
+        texture: &GpuTexture,
+        instances: Range<u32>,
+    ) {
         debug_assert!(
             instances.end as usize <= self.instance_cap,
             "instance range {instances:?} exceeds the uploaded buffer"
@@ -561,7 +599,7 @@ impl MeshRenderer {
         let stride = size_of::<InstanceRaw>() as wgpu::BufferAddress;
         let bytes = u64::from(instances.start) * stride..u64::from(instances.end) * stride;
 
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &texture.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -975,6 +1013,78 @@ pub fn render_world(
     state.last_frame_draw_calls = draws.len() as u32;
 }
 
+/// One translucent mesh drawn by [`render_overlay`].
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayDraw {
+    /// The mesh to draw.
+    pub mesh: MeshHandle,
+    /// Where, in world space.
+    pub transform: Transform,
+    /// Linear RGBA tint; alpha is the opacity.
+    pub color: [f32; 4],
+}
+
+/// Draws `draws` as tinted, translucent meshes over what `color` and
+/// `depth` already hold (after [`render_world`]), as seen by the
+/// [`Camera`] resource: alpha-blended, hidden behind nearer opaque
+/// surfaces, and not writing depth. For editor overlays such as collider
+/// shapes (GE-034); [`render_world`] never draws them.
+///
+/// Draws whose mesh is not in the registry are skipped.
+///
+/// # Panics
+///
+/// If the [`RenderState`] or [`Camera`] resource is missing.
+pub fn render_overlay(
+    res: &mut Resources,
+    ctx: &GpuContext,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    aspect: f32,
+    draws: &[OverlayDraw],
+) {
+    let camera = *res.expect::<Camera>();
+    let state = res.expect_mut::<RenderState>();
+    let draws: Vec<&OverlayDraw> = draws
+        .iter()
+        .filter(|d| state.registry.contains(d.mesh))
+        .collect();
+    if draws.is_empty() {
+        return;
+    }
+    let instances: Vec<InstanceRaw> = draws
+        .iter()
+        .map(|d| InstanceRaw::from_transform(&d.transform, d.color))
+        .collect();
+    state.renderer.set_camera(&ctx.queue, &camera, aspect);
+    state.renderer.set_light(&ctx.queue, &state.light);
+    state
+        .renderer
+        .upload_instances(&ctx.device, &ctx.queue, &instances);
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_overlay encoder"),
+        });
+    {
+        let mut pass = mesh_pass(
+            &mut encoder,
+            color,
+            depth,
+            wgpu::LoadOp::Load,
+            wgpu::LoadOp::Load,
+        );
+        for (i, draw) in draws.iter().enumerate() {
+            let i = i as u32;
+            state
+                .renderer
+                .draw_overlay(&mut pass, state.registry.get(draw.mesh), i..i + 1);
+        }
+    }
+    ctx.queue.submit([encoder.finish()]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1183,58 @@ mod tests {
         assert!(error.is_none(), "validation error: {error:?}");
         // The cube really was drawn: the centre is not the black clear colour.
         assert_ne!(image.get_pixel(16, 16).0, [0, 0, 0, 255]);
+        Ok(())
+    }
+
+    /// GE-034: an overlay blends over the frame by its alpha, and is hidden
+    /// behind nearer opaque surfaces.
+    #[test]
+    fn render_overlay_blends_and_is_depth_tested() -> anyhow::Result<()> {
+        let mut engine = crate::headless::Headless::new(32, 32)?;
+        let scope = engine
+            .gpu
+            .device
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let mesh = engine
+            .resources
+            .expect_mut::<RenderState>()
+            .registry
+            .add(&engine.gpu.device, &crate::asset::cube());
+        let overlay = |engine: &mut crate::headless::Headless, alpha: f32| {
+            engine.render_to_target();
+            let draw = OverlayDraw {
+                mesh,
+                transform: Transform::default(),
+                color: [1.0, 0.0, 0.0, alpha],
+            };
+            let (color, depth) = (&engine.target.color_view, &engine.target.depth_view);
+            render_overlay(&mut engine.resources, &engine.gpu, color, depth, 1.0, &[draw]);
+            engine.target.read_pixels(&engine.gpu)
+        };
+        let opaque = overlay(&mut engine, 1.0)?.get_pixel(16, 16).0;
+        let translucent = overlay(&mut engine, 0.5)?.get_pixel(16, 16).0;
+        assert!(opaque[0] > 100, "{opaque:?}");
+        assert!(
+            translucent[0] > 20 && translucent[0] < opaque[0] - 20,
+            "half as red: {translucent:?} vs {opaque:?}"
+        );
+        assert_eq!(translucent[1..3], [0, 0]);
+
+        // A white cube drawn normally in front hides the overlay.
+        engine.world.spawn((
+            Transform::from_translation(Vec3::new(0.0, 0.5, 2.0)),
+            MeshInstance {
+                mesh,
+                color: [1.0; 4],
+                texture: None,
+            },
+        ));
+        let hidden = overlay(&mut engine, 0.5)?.get_pixel(16, 16).0;
+        assert!(
+            hidden[0] > 50 && hidden[0] == hidden[1] && hidden[1] == hidden[2],
+            "the white cube, no red tint: {hidden:?}"
+        );
+        assert!(pollster::block_on(scope.pop()).is_none());
         Ok(())
     }
 }
