@@ -30,10 +30,10 @@ fn update(entity, dt) {
 }
 ```
 
-- `entity.transform` has `.translation` and `.scale` (`vec3(x, y, z)`,
+- The entity's `.transform` has `.translation` and `.scale` (`vec3(x, y, z)`,
   with `.x` `.y` `.z`) and `.rotation` (a quaternion; build one with
   `quat_euler(x, y, z)` in **radians**). Changes are written back.
-- `entity.id` and `entity.name` are read-only. `dt` is the fixed step in
+- The entity's `.id` and `.name` are read-only. `dt` is the fixed step in
   seconds; `time()` is simulated seconds since play started.
 - Only `update` and functions it calls run. Functions cannot see outer
   `let`s, so put settings inside `update` or in helpers (`fn speed() { 1.5 }`).

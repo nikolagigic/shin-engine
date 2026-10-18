@@ -107,6 +107,13 @@ fn generated_project_serves_its_own_tools_and_systems() -> anyhow::Result<()> {
         assert!(names.contains(&name), "{name} missing from {names:?}");
     }
 
+    // The game serves the engine's skills as prompts too (GE-039).
+    let prompts = server.request(3, "prompts/list", json!({}));
+    let prompts = prompts["result"]["prompts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no prompts in {prompts}"));
+    assert_eq!(prompts.len(), shin::project::skills::SKILLS.len());
+
     // ...and callable.
     let hello = server.call("game.hello", json!({}));
     assert_ne!(hello["isError"], json!(true), "{hello}");
