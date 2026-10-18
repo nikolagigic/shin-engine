@@ -11,6 +11,9 @@
 //! The scene's own [`Camera`] resource is left as authored (GE-030): the
 //! editor's [`OrbitCamera`] is swapped in only around the viewport render
 //! while editing, and Play renders from the scene camera as the game would.
+//! Clicking in the viewport selects, and the gizmo's handle drags arrive
+//! as the same preview and edit actions an Inspector drag produces
+//! (GE-035).
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
@@ -36,6 +39,7 @@ use winit::window::Window;
 
 use crate::assets::{self, AssetBrowser};
 use crate::edit;
+use crate::gizmo::TransformGizmo;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
@@ -76,6 +80,8 @@ pub struct EditorCore {
     /// scans and Import copies into.
     project_dir: PathBuf,
     selection: Selection,
+    /// The viewport's transform gizmo on the selection (GE-035).
+    gizmo: TransformGizmo,
     inspector: Inspector,
     /// The Assets panel (GE-032).
     assets: AssetBrowser,
@@ -127,6 +133,7 @@ impl EditorCore {
             project,
             project_dir,
             selection: Selection::default(),
+            gizmo: TransformGizmo::default(),
             inspector: Inspector::default(),
             assets: AssetBrowser::default(),
             assets_docked: false,
@@ -175,6 +182,7 @@ impl EditorCore {
                 viewport: &mut self.viewport,
                 console: &mut self.console,
                 selection: &mut self.selection,
+                gizmo: &mut self.gizmo,
                 inspector: &mut self.inspector,
                 assets: &mut self.assets,
                 project_dir: &self.project_dir,
@@ -696,11 +704,17 @@ pub fn run(project_dir: &Path, log: LogBuffer, orbit_demo: bool) -> anyhow::Resu
 
 /// Renders one full editor frame of the project in `project_dir` without a
 /// window, [`WINDOW_SIZE`] pixels at one pixel per point, and saves it as a
-/// PNG at `out`.
+/// PNG at `out`. With `select`, the entity with that name is selected
+/// first, so the frame shows its highlight and gizmo (GE-035).
 ///
 /// The frame is run a few times first so egui and the dock settle their
 /// layout and the viewport target exists at its final size.
-pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Result<()> {
+pub fn screenshot(
+    project_dir: &Path,
+    out: &Path,
+    select: Option<&str>,
+    log: LogBuffer,
+) -> anyhow::Result<()> {
     /// Frames run before the one that is saved.
     const WARM_UP_FRAMES: u32 = 3;
 
@@ -708,6 +722,17 @@ pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Res
     log::info!("rendering a screenshot of `{}`", title(&project));
     let gpu = GpuContext::new(None)?;
     let mut core = EditorCore::new(&gpu, egui::Context::default(), project_dir, log)?;
+    if let Some(name) = select {
+        let entity = core
+            .engine
+            .world
+            .query::<(Entity, &Name)>()
+            .iter()
+            .find(|(_, n)| n.0 == name)
+            .map(|(entity, _)| entity)
+            .with_context(|| format!("no entity named `{name}` to select"))?;
+        core.selection.0 = Some(entity);
+    }
     let [width, height] = WINDOW_SIZE;
     let target = OffscreenTarget::new(&gpu.device, width, height);
     let screen_rect =
@@ -1840,6 +1865,188 @@ mod tests {
         assert!(err.to_string().contains("while playing"), "{err}");
         core.try_run(Action::Stop)?;
 
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Where `point` (world space) appears on screen in the viewport, as
+    /// the last frame laid it out and the viewport camera sees it.
+    fn on_screen(core: &EditorCore, point: Vec3) -> egui::Pos2 {
+        let rect = core.viewport.rect.expect("the viewport was laid out");
+        let camera = crate::pick::viewport_camera(&core.engine, &core.orbit).expect("a camera");
+        let ndc = camera
+            .view_projection(rect.aspect_ratio())
+            .project_point3(point);
+        egui::pos2(
+            rect.min.x + (ndc.x + 1.0) / 2.0 * rect.width(),
+            rect.min.y + (1.0 - ndc.y) / 2.0 * rect.height(),
+        )
+    }
+
+    /// The primary button going down (`pressed`) or up at `pos`.
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A click at `pos` over three frames: move there, press, release.
+    fn click(core: &mut EditorCore, gpu: &GpuContext, target: &OffscreenTarget, pos: egui::Pos2) {
+        frame(core, gpu, target, vec![egui::Event::PointerMoved(pos)]);
+        frame(core, gpu, target, vec![button(pos, true)]);
+        frame(core, gpu, target, vec![button(pos, false)]);
+    }
+
+    /// GE-035: a click in the viewport (synthetic pointer events) selects
+    /// the entity under the pointer; a click on empty space deselects; a
+    /// click-drag orbits without changing the selection.
+    #[test]
+    fn pick_by_clicking_in_the_viewport() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("pick-click")?;
+        let cube = named(&core, "cube");
+        let centre = shin::ecs::world_transform(&core.engine.world, cube).translation;
+        assert_eq!(core.selection.0, None);
+
+        let at_cube = on_screen(&core, centre);
+        click(&mut core, &gpu, &target, at_cube);
+        assert_eq!(core.selection.0, Some(cube), "the cube is selected");
+
+        // The viewport's top-left corner looks at the sky.
+        let rect = core.viewport.rect.unwrap();
+        let sky = rect.min + egui::vec2(20.0, 20.0);
+        let camera = crate::pick::viewport_camera(&core.engine, &core.orbit).unwrap();
+        let ndc = crate::pick::ndc(
+            [
+                Vec2::new(rect.min.x, rect.min.y),
+                Vec2::new(rect.max.x, rect.max.y),
+            ],
+            Vec2::new(sky.x, sky.y),
+        );
+        assert_eq!(
+            crate::pick::pick_at(&core.engine, &camera, rect.aspect_ratio(), ndc),
+            None,
+            "nothing is there"
+        );
+        click(&mut core, &gpu, &target, sky);
+        assert_eq!(core.selection.0, None, "empty space deselects");
+
+        // Dragging from the cube orbits and does not select.
+        let from = on_screen(&core, centre);
+        let orbit = core.orbit;
+        frame(
+            &mut core,
+            &gpu,
+            &target,
+            vec![egui::Event::PointerMoved(from)],
+        );
+        frame(&mut core, &gpu, &target, vec![button(from, true)]);
+        for step in 1..=4 {
+            let to = from + egui::vec2(30.0 * step as f32, 0.0);
+            frame(
+                &mut core,
+                &gpu,
+                &target,
+                vec![egui::Event::PointerMoved(to)],
+            );
+        }
+        frame(
+            &mut core,
+            &gpu,
+            &target,
+            vec![button(from + egui::vec2(120.0, 0.0), false)],
+        );
+        assert_ne!(core.orbit, orbit, "the drag orbited");
+        assert_eq!(core.selection.0, None, "a drag is not a click");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-035: dragging the selection's translate handle (synthetic
+    /// pointer events through whole editor frames) moves it without
+    /// orbiting, records one edit, and Ctrl+Z reverts the whole drag.
+    #[test]
+    fn gizmo_drag_in_the_viewport_and_ctrl_z() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("gizmo-drag")?;
+        let cube = named(&core, "cube");
+        core.selection.0 = Some(cube);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let before = *core.engine.world.get::<&Transform>(cube)?;
+        let orbit = core.orbit;
+
+        // Walk out along the projected X axis to the arrow.
+        let centre = before.translation;
+        let from = on_screen(&core, centre);
+        let along = (on_screen(&core, centre + Vec3::X) - from).normalized();
+        let handle = (30..150)
+            .map(|d| from + along * d as f32)
+            .find(|&p| core.gizmo.handle_at(p))
+            .expect("the X arrow is on screen");
+
+        frame(
+            &mut core,
+            &gpu,
+            &target,
+            vec![egui::Event::PointerMoved(handle)],
+        );
+        frame(&mut core, &gpu, &target, vec![button(handle, true)]);
+        for step in 1..=5 {
+            let to = handle + along * (25.0 * step as f32);
+            frame(
+                &mut core,
+                &gpu,
+                &target,
+                vec![egui::Event::PointerMoved(to)],
+            );
+        }
+        let end = handle + along * 125.0;
+        frame(&mut core, &gpu, &target, vec![button(end, false)]);
+
+        let after = *core.engine.world.get::<&Transform>(cube)?;
+        assert!(
+            after.translation.x > before.translation.x + 0.5,
+            "moved along +X: {before:?} -> {after:?}"
+        );
+        assert_eq!(after.translation.y, before.translation.y);
+        assert_eq!(after.translation.z, before.translation.z);
+        assert_eq!(core.orbit, orbit, "the camera did not orbit");
+        assert_eq!(core.selection.0, Some(cube), "still selected");
+        let stack = core.undo_stack();
+        assert_eq!(stack.len(), 1, "one entry for the drag: {stack:?}");
+        assert_eq!(stack[0].0, "entity.set_transform");
+        assert!(core.is_dirty());
+
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert_eq!(
+            *core.engine.world.get::<&Transform>(cube)?,
+            before,
+            "Ctrl+Z reverts the whole drag"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-035: W, E, and R over the viewport switch the gizmo's mode.
+    #[test]
+    fn gizmo_mode_keys() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("gizmo-keys")?;
+        let inside = core.viewport.rect.unwrap().center();
+        frame(
+            &mut core,
+            &gpu,
+            &target,
+            vec![egui::Event::PointerMoved(inside)],
+        );
+        for (key, mode) in [
+            (egui::Key::E, crate::gizmo::Mode::Rotate),
+            (egui::Key::R, crate::gizmo::Mode::Scale),
+            (egui::Key::W, crate::gizmo::Mode::Translate),
+        ] {
+            frame(&mut core, &gpu, &target, vec![self::key(key)]);
+            assert_eq!(core.gizmo.mode, mode, "{key:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
