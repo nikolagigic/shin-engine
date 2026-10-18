@@ -3,12 +3,15 @@
 //! and History (right), and Log and Console (below the viewport).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
-//! orbit-camera moves. The Scene panel lists entities (click to select) and
-//! adds and deletes them; the Inspector ([`crate::inspector`]) edits the
-//! selected one and shows the scene's own camera, with buttons to move the
-//! viewport camera to it and to set it from the viewport (GE-030); the
-//! Assets panel ([`crate::assets`]) lists the project's files and uses
-//! them. Edits are not made here: the UI pushes [`Action`]s that
+//! orbit-camera moves. The Scene panel shows entities as a collapsible tree
+//! (GE-031; click to select, drag a row onto another to reparent, drop it
+//! below the tree or use the right-click menu to unparent) and adds and
+//! deletes them; "+" adds a child of the selection when there is one. The
+//! Inspector ([`crate::inspector`]) edits the selected one and shows the
+//! scene's own camera, with buttons to move the viewport camera to it and
+//! to set it from the viewport (GE-030); the Assets panel
+//! ([`crate::assets`]) lists the project's files and uses them. Edits are
+//! not made here: the UI pushes [`Action`]s that
 //! [`crate::editor::EditorCore`] runs after the UI pass.
 //!
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
@@ -21,16 +24,18 @@
 //! key, and File > Open and Save are greyed out or ignored (entities can
 //! still be selected).
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use egui::collapsing_header::CollapsingState;
 use egui::{
-    Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, TextureId, Ui,
-    WidgetText, pos2,
+    Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, Stroke, StrokeKind,
+    TextureId, Ui, WidgetText, pos2,
 };
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use serde_json::Value;
 use shin::command::History;
-use shin::ecs::{Entity, Name};
+use shin::ecs::{Entity, Name, child_map, parent_of};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec2};
 use shin::scene::TransformDesc;
@@ -74,6 +79,11 @@ pub const CLOSEABLE_TABS: [Tab; 6] = [
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Selection(pub Option<Entity>);
 
+/// The drag-and-drop payload of a Scene panel row: the entity being
+/// dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DraggedEntity(pub Entity);
+
 /// The built-in meshes the Scene panel's "+ Cube" and "+ Sphere" add.
 pub const ADD_BUTTONS: [(&str, &str); 2] = [
     ("+ Cube", "builtin://cube"),
@@ -91,8 +101,17 @@ pub enum Action {
     /// Run a console line.
     Console(String),
     /// Add an entity drawing the mesh at this asset source at the orbit
-    /// target, and select it.
+    /// target, as a child of the selected entity if there is one, and
+    /// select it.
     Spawn(String),
+    /// Make `parent` the parent of `entity`, or make `entity` a root with
+    /// `None`, keeping its world transform (GE-031).
+    Reparent {
+        /// The entity that moves in the tree.
+        entity: Entity,
+        /// Its new parent; `None` for a root.
+        parent: Option<Entity>,
+    },
     /// Delete this entity.
     Despawn(Entity),
     /// Show this transform on the entity without recording it (a drag in
@@ -486,25 +505,144 @@ impl EditorUi<'_> {
         });
     }
 
-    /// The entities that have a transform, in id order; clicking one
-    /// selects it.
+    /// The entities that have a transform as a tree: roots in id order,
+    /// each with its children (in id order) in a collapsible branch.
+    /// Clicking a row selects it. While editing, dragging a row onto
+    /// another makes it that entity's child, dropping it on the space below
+    /// the tree makes it a root, and a row's right-click menu has Unparent.
     fn entity_list(&mut self, ui: &mut Ui) {
-        let mut rows: Vec<(Entity, String)> = self
-            .engine
-            .world
+        let world = &self.engine.world;
+        let mut labels: HashMap<Entity, String> = world
             .query::<(Entity, &Transform, Option<&Name>)>()
             .iter()
             .map(|(entity, _, name)| (entity, entity_label(entity, name)))
             .collect();
-        rows.sort_by_key(|(entity, _)| entity_id(*entity));
-        if rows.is_empty() {
+        let children = child_map(world);
+        // A child whose parent has no transform is listed as a root.
+        let mut roots: Vec<Entity> = labels
+            .keys()
+            .copied()
+            .filter(|&e| !parent_of(world, e).is_some_and(|p| labels.contains_key(&p)))
+            .collect();
+        roots.sort_by_key(|e| entity_id(*e));
+        if roots.is_empty() {
             ui.weak("No entities");
         }
-        for (entity, label) in rows {
-            let selected = self.selection.0 == Some(entity);
-            if ui.selectable_label(selected, label).clicked() {
-                self.selection.0 = Some(entity);
+        let editing = !self.engine.play_state().is_playing();
+        for root in roots {
+            self.tree_node(ui, root, &children, &mut labels, editing);
+        }
+        if editing {
+            // The rest of the panel is a drop target that unparents.
+            let width = ui.available_width();
+            let height = ui.available_height().max(24.0);
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+            if response.dnd_hover_payload::<DraggedEntity>().is_some() {
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    ui.visuals().selection.stroke,
+                    StrokeKind::Inside,
+                );
             }
+            if let Some(dragged) = response.dnd_release_payload::<DraggedEntity>() {
+                self.reparent(dragged.0, None);
+            }
+        }
+    }
+
+    /// One row of the tree and, if `entity` has children, its collapsible
+    /// branch (open by default). `labels` holds the rows not drawn yet, so
+    /// each entity is drawn once.
+    fn tree_node(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        children: &HashMap<Entity, Vec<Entity>>,
+        labels: &mut HashMap<Entity, String>,
+        editing: bool,
+    ) {
+        let Some(label) = labels.remove(&entity) else {
+            return;
+        };
+        let kids: Vec<Entity> = children
+            .get(&entity)
+            .map(|kids| {
+                kids.iter()
+                    .copied()
+                    .filter(|k| labels.contains_key(k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if kids.is_empty() {
+            ui.horizontal(|ui| {
+                // Line up with rows that have a collapse arrow.
+                ui.add_space(ui.spacing().indent);
+                self.tree_row(ui, entity, label, editing);
+            });
+            return;
+        }
+        let id = ui.make_persistent_id(("scene_tree", entity_id(entity)));
+        let _ = CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| self.tree_row(ui, entity, label, editing))
+            .body(|ui| {
+                for kid in kids {
+                    self.tree_node(ui, kid, children, labels, editing);
+                }
+            });
+    }
+
+    /// A selectable row; while editing also a drag source, a drop target
+    /// (reparent onto this entity), and a right-click menu with Unparent.
+    fn tree_row(&mut self, ui: &mut Ui, entity: Entity, label: String, editing: bool) {
+        let selected = self.selection.0 == Some(entity);
+        let sense = if editing {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let response = ui.add(egui::Button::selectable(selected, label).sense(sense));
+        if response.clicked() {
+            self.selection.0 = Some(entity);
+        }
+        if !editing {
+            return;
+        }
+        response.dnd_set_drag_payload(DraggedEntity(entity));
+        if response
+            .dnd_hover_payload::<DraggedEntity>()
+            .is_some_and(|dragged| dragged.0 != entity)
+        {
+            ui.painter().rect_stroke(
+                response.rect,
+                2.0,
+                Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                StrokeKind::Outside,
+            );
+        }
+        if let Some(dragged) = response.dnd_release_payload::<DraggedEntity>()
+            && dragged.0 != entity
+        {
+            self.reparent(dragged.0, Some(entity));
+        }
+        let has_parent = parent_of(&self.engine.world, entity).is_some();
+        response.context_menu(|ui| {
+            if ui
+                .add_enabled(has_parent, egui::Button::new("Unparent"))
+                .clicked()
+            {
+                self.reparent(entity, None);
+                ui.close();
+            }
+        });
+    }
+
+    /// Asks for `entity` to move under `parent` (or to the top level with
+    /// `None`), unless it is already there.
+    fn reparent(&mut self, entity: Entity, parent: Option<Entity>) {
+        if parent_of(&self.engine.world, entity) != parent {
+            self.actions.push(Action::Reparent { entity, parent });
         }
     }
 

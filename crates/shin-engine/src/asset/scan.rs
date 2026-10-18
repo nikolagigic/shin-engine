@@ -329,9 +329,14 @@ mod tests {
                     "scene",
                     "scenes/main.scene.ron".to_string()
                 ),
+                (
+                    "scripts/player.rhai".to_string(),
+                    "script",
+                    "scripts/player.rhai".to_string()
+                ),
             ],
-            "the starter cube (one primitive, no images) and the entry scene; \
-             cube.bin, src/, and target/ do not show"
+            "the starter cube (one primitive, no images), the entry scene, and \
+             the starter player script; cube.bin, src/, and target/ do not show"
         );
         assert_eq!(
             entries[0].source,
@@ -405,6 +410,11 @@ mod tests {
                     "scenes/other.scene.ron".to_string()
                 ),
                 (
+                    "scripts/player.rhai".to_string(),
+                    "script",
+                    "scripts/player.rhai".to_string()
+                ),
+                (
                     "scripts/spin.rhai".to_string(),
                     "script",
                     "scripts/spin.rhai".to_string()
@@ -429,8 +439,8 @@ mod tests {
         let entries = scan(&dir)?;
         assert_eq!(
             rows(&entries).len(),
-            2,
-            "the broken file is skipped: {entries:?}"
+            3,
+            "the broken file is skipped (cube, scene, and player script remain): {entries:?}"
         );
 
         // A root with none of the directories scans to nothing.

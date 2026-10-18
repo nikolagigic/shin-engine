@@ -25,7 +25,7 @@ The window opens at 1600 × 900 with seven docked panels:
 | Panel         | Where      | Shows |
 |---------------|------------|-------|
 | **Viewport**  | centre     | The scene, rendered live from the editor's orbit camera (from the scene's own camera while playing). The selected entity is drawn with its colour mixed halfway toward white. |
-| **Scene**     | left, top  | Every entity that has a transform, in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
+| **Scene**     | left, top  | Every entity that has a transform, as a tree: children under their parent, each level in id order, labelled by its name or `#<id>` when it has none; buttons to add and delete. |
 | **Assets**    | left, bottom | The project's meshes, textures, scenes, and scripts, with a button per entry to use it, and an Import row. |
 | **Inspector** | right, top | The selected entity's properties, editable, and the scene camera. |
 | **History**   | right, bottom | The command history: undoable edits oldest first as `tool {args}`, then undone edits greyed out. |
@@ -66,6 +66,25 @@ at a time. Escape clears the selection. New entities are selected as they
 are added, and an entity that is deleted (or that disappears when play
 stops) is deselected.
 
+## The scene tree
+
+The Scene panel shows the [hierarchy](scenes.md#children). An entity with
+children has an arrow; click it to fold or unfold the branch.
+
+- **Drag a row onto another row** to make the dragged entity a child of
+  the one you drop it on. The target row is outlined while you hover. The
+  entity keeps its place in the world: its transform is rewritten to be
+  local to the new parent. You cannot drop an entity onto itself or onto
+  one of its own descendants; that is logged as an error and nothing
+  changes.
+- **Drop a row on the empty space below the tree**, or right-click a row
+  and choose **Unparent**, to make it a top-level entity again, also in
+  the same world position.
+
+Each reparent is one recorded `entity.set_parent` call, so Ctrl+Z undoes
+it. Save writes children nested under their parent in the scene file.
+Dragging is off while playing.
+
 ## The inspector
 
 The Inspector shows `Entity #<id>` and these rows for the selected entity:
@@ -73,7 +92,9 @@ The Inspector shows `Entity #<id>` and these rows for the selected entity:
 | Row              | Edit | Tool call recorded |
 |------------------|------|--------------------|
 | **Name**         | A text field; commits when it loses focus. An empty name removes the name. | `entity.set_name` |
-| **Translation**, **Rotation (°)**, **Scale** | Three drag values each. Dragging previews the change live in the viewport and records one edit when the pointer is released; a typed number commits when its field loses focus. Rotation is Euler angles in degrees, applied in X, Y, Z order. | `entity.set_transform` |
+| **Parent**       | The parent's name, or `(none)`. Read-only; reparent in the Scene panel. | |
+| **Translation**, **Rotation (°)**, **Scale** | Local to the parent (world space for a top-level entity). Three drag values each. Dragging previews the change live in the viewport and records one edit when the pointer is released; a typed number commits when its field loses focus. Rotation is Euler angles in degrees, applied in X, Y, Z order. | `entity.set_transform` |
+| **World position**, **World rotation (°)**, **World scale** | The entity's place in the world, after its parents' transforms. Read-only. | |
 | **Mesh**         | A drop-down of every mesh source loaded so far plus `builtin://cube` and `builtin://sphere`, and a text field for any asset source (press Enter). See [asset sources](scenes.md#asset-sources). | `entity.set_mesh` |
 | **Colour**       | A colour picker for the mesh's linear RGBA tint, with alpha. Picking previews live and records one edit when the pointer is released. Only shown for entities that draw a mesh. | `entity.set_color` |
 | **Script**       | The path of the entity's Rhai script, relative to the project (`scripts/name.rhai`); commits when the field loses focus. Clearing it removes the script. The script's latest compile or runtime error, if any, is shown in red below the grid. | `script.attach` |
@@ -105,18 +126,21 @@ The Scene panel's controls:
 
 - **+ Cube** and **+ Sphere** add an entity drawing `builtin://cube` or
   `builtin://sphere` at the orbit camera's target, named `cube` or
-  `sphere`, and select it.
+  `sphere`, and select it. When an entity is selected, the new one is
+  added as its child, still at the orbit target in the world. Press
+  Escape first to add a top-level entity.
 - **+ From asset** adds an entity drawing any [asset
   source](scenes.md#asset-sources) typed in the field next to it (the
   hint is `assets/x.gltf#0`), named after the file (`assets/crate.gltf#1`
-  gives `crate`). Enter in the field does the same.
-- **Delete** removes the selected entity, as do the Delete and Backspace
-  keys while no text field has focus.
+  gives `crate`). Enter in the field does the same. Like the buttons, it
+  adds a child of the selection when there is one.
+- **Delete** removes the selected entity and all its children, as do the
+  Delete and Backspace keys while no text field has focus.
 
 Adding loads the mesh with `asset.load` (not recorded: loading changes no
 entity) and spawns with one recorded `entity.spawn`; deleting is one
-recorded `entity.despawn`. Undoing a delete brings the entity back under
-the same id.
+recorded `entity.despawn`. Undoing a delete brings the entity and its
+children back under the same ids.
 
 ## The Assets panel
 
@@ -144,7 +168,7 @@ playing:
 
 | Kind    | Button     | Does | Tool call recorded |
 |---------|------------|------|--------------------|
-| mesh    | **Spawn**  | Adds an entity drawing the mesh at the orbit camera's target, named after the file, and selects it (like **+ From asset**). | `entity.spawn` |
+| mesh    | **Spawn**  | Adds an entity drawing the mesh at the orbit camera's target, named after the file, and selects it (like **+ From asset**, it becomes a child of the selection when there is one). | `entity.spawn` |
 | mesh    | **Assign** | Makes the selected entity draw this mesh; colour and texture are kept. | `entity.set_mesh` |
 | texture | **Assign** | Gives the selected entity this base-colour texture (it must draw a mesh). | `entity.set_texture` |
 | script  | **Attach** | Attaches the script to the selected entity, replacing any it had. | `script.attach` |

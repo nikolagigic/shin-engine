@@ -25,10 +25,13 @@
 //! alone.
 //!
 //! A snapshot holds, per entity, the components the editing tools change:
-//! [`Transform`], [`MeshInstance`], [`Name`], and [`Script`]. Restoring one keeps every
+//! [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`], and
+//! [`Children`]. Restoring one keeps every
 //! entity's [`Entity`] id (via `World::spawn_at`), so ids handed out by
 //! `entity.spawn` stay valid across undo and redo. Other components on a
-//! restored entity are kept if it is alive and lost if it is respawned.
+//! restored entity are kept if it is alive and lost if it is respawned
+//! (the [`GlobalTransform`](crate::ecs::GlobalTransform) among them, which
+//! the next propagation rewrites).
 //!
 //! ```no_run
 //! use serde_json::json;
@@ -57,7 +60,7 @@ use serde_json::Value;
 
 pub use tools::register_tools;
 
-use crate::ecs::{Entity, Name, World};
+use crate::ecs::{Children, Entity, Name, Parent, World};
 use crate::headless::Headless;
 use crate::math::{Camera, Transform};
 use crate::render::{LightUniform, MeshInstance, RenderState};
@@ -93,6 +96,9 @@ pub enum Affected {
     /// Entities the call creates. They are found by comparing the world
     /// before and after the call, and captured after it.
     Spawned,
+    /// Entities the call creates, plus these existing ones it changes (an
+    /// `entity.spawn` under a parent, whose child list grows).
+    SpawnedWith(Vec<Entity>),
     /// Every entity (for example `scene.clear`).
     AllEntities,
     /// The [`Camera`] resource.
@@ -110,6 +116,8 @@ struct EntityState {
     instance: Option<MeshInstance>,
     name: Option<Name>,
     script: Option<Script>,
+    parent: Option<Parent>,
+    children: Option<Children>,
 }
 
 impl EntityState {
@@ -120,6 +128,8 @@ impl EntityState {
             instance: world.get::<&MeshInstance>(entity).ok().map(|i| *i),
             name: world.get::<&Name>(entity).ok().map(|n| (*n).clone()),
             script: world.get::<&Script>(entity).ok().map(|s| (*s).clone()),
+            parent: world.get::<&Parent>(entity).ok().map(|p| *p),
+            children: world.get::<&Children>(entity).ok().map(|c| (*c).clone()),
         }
     }
 }
@@ -143,8 +153,8 @@ struct EntitiesSnapshot {
 
 /// The state a tool call touched, captured before or after it: the
 /// affected entities (keyed by [`Entity`] id, each with its
-/// [`Transform`], [`MeshInstance`], [`Name`], and [`Script`]), plus the camera or the
-/// light when the tool changes them.
+/// [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`], and
+/// [`Children`]), plus the camera or the light when the tool changes them.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     entities: Option<EntitiesSnapshot>,
@@ -226,6 +236,8 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
         let _ = world.remove_one::<MeshInstance>(entity);
         let _ = world.remove_one::<Name>(entity);
         let _ = world.remove_one::<Script>(entity);
+        let _ = world.remove_one::<Parent>(entity);
+        let _ = world.remove_one::<Children>(entity);
     } else {
         world.spawn_at(entity, ());
     }
@@ -240,6 +252,12 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
     }
     if let Some(script) = &state.script {
         world.insert_one(entity, script.clone())?;
+    }
+    if let Some(parent) = state.parent {
+        world.insert_one(entity, parent)?;
+    }
+    if let Some(children) = &state.children {
+        world.insert_one(entity, children.clone())?;
     }
     Ok(())
 }
@@ -299,38 +317,47 @@ impl History {
         }
         let (entities, camera, light) = match &affected {
             Affected::None => return reg.call(engine, tool, args),
-            Affected::Entities(ids) => (Some(Scope::Only(ids.clone())), false, false),
+            Affected::Entities(ids) | Affected::SpawnedWith(ids) => {
+                (Some(Scope::Only(ids.clone())), false, false)
+            }
             Affected::Spawned => (Some(Scope::Only(Vec::new())), false, false),
             Affected::AllEntities => (Some(Scope::All), false, false),
             Affected::Camera => (None, true, false),
             Affected::Light => (None, false, true),
             Affected::Scene => (Some(Scope::All), true, true),
         };
-        let existing: HashSet<Entity> = match affected {
-            Affected::Spawned => engine.world.iter().map(|e| e.entity()).collect(),
-            _ => HashSet::new(),
+        let spawning = matches!(affected, Affected::Spawned | Affected::SpawnedWith(_));
+        let existing: HashSet<Entity> = if spawning {
+            engine.world.iter().map(|e| e.entity()).collect()
+        } else {
+            HashSet::new()
         };
         let mut before = Snapshot::capture(engine, entities.clone(), camera, light);
 
         let output = reg.call(engine, tool, args.clone())?;
 
-        let entities = match affected {
-            Affected::Spawned => {
-                let mut new: Vec<Entity> = engine
-                    .world
-                    .iter()
-                    .map(|e| e.entity())
-                    .filter(|e| !existing.contains(e))
-                    .collect();
-                new.sort();
-                // Before the call none of them existed.
-                before.entities = Some(EntitiesSnapshot {
-                    scope: Scope::Only(new.clone()),
-                    alive: Vec::new(),
-                });
-                Some(Scope::Only(new))
+        let entities = if spawning {
+            let mut new: Vec<Entity> = engine
+                .world
+                .iter()
+                .map(|e| e.entity())
+                .filter(|e| !existing.contains(e))
+                .collect();
+            new.sort();
+            // The new entities join the scope; before the call none of
+            // them existed, so `before` (which captured only the existing
+            // ones) already says to despawn them.
+            let mut scope = match entities {
+                Some(Scope::Only(ids)) => ids,
+                _ => Vec::new(),
+            };
+            scope.extend(new);
+            if let Some(snapshot) = &mut before.entities {
+                snapshot.scope = Scope::Only(scope.clone());
             }
-            _ => entities,
+            Some(Scope::Only(scope))
+        } else {
+            entities
         };
         let after = Snapshot::capture(engine, entities, camera, light);
         self.push(Entry {

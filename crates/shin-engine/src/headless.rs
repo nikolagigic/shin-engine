@@ -285,8 +285,9 @@ impl Headless {
     ///
     /// Sets `Time::frame_dt` and `Time::alpha` to zero (headless frames
     /// have no wall-clock duration and always land on a whole step), runs
-    /// the frame systems, clears the target to [`Self::clear_color`] (depth
-    /// to 1.0), then calls [`Self::render_fn`] if one is installed.
+    /// the frame systems and then [`ecs::propagate_transforms`], clears the
+    /// target to [`Self::clear_color`] (depth to 1.0), then calls
+    /// [`Self::render_fn`] if one is installed.
     pub fn render_to_target(&mut self) {
         if self.resources.get::<Time>().is_none() {
             self.resources.insert(Time::default());
@@ -296,6 +297,7 @@ impl Headless {
         time.alpha = 0.0;
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
+        ecs::propagate_transforms(&mut self.world, &mut self.resources);
 
         self.clear();
         if let Some(render_fn) = &mut self.render_fn {

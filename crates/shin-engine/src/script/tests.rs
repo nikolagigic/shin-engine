@@ -117,6 +117,37 @@ fn scripts_see_id_name_dt_and_full_transform() {
 
 /// AC 3: a syntax error is logged and recorded with file and line, and the
 /// engine keeps going.
+/// GE-031: `entity.transform` is local to the parent; `world_transform`
+/// is the composed value and writing to it changes nothing.
+#[test]
+fn hierarchy_scripts_see_local_and_world_transforms() {
+    let dir = temp_dir("hierarchy");
+    write_script(
+        &dir,
+        "scripts/bob.rhai",
+        "fn update(entity, dt) {\n\
+         \x20   let w = entity.world_transform;\n\
+         \x20   entity.transform.translation.y = w.translation.x;\n\
+         \x20   w.translation.z = 99.0;\n\
+         \x20   entity.world_transform.translation.z = 99.0;\n\
+         }\n",
+        0,
+    );
+    let (mut world, mut res, mut schedule, entity) = scripted_world(&dir, "scripts/bob.rhai");
+    let parent = world.spawn((Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),));
+    crate::ecs::set_parent(&mut world, entity, Some(parent), false).unwrap();
+
+    fixed_step(&mut world, &mut res, &mut schedule, DT);
+    let local = *world.get::<&Transform>(entity).unwrap();
+    // local x stays 2; world x is 12, copied into local y; z untouched.
+    assert_eq!(local.translation, Vec3::new(2.0, 12.0, 0.0));
+    assert_eq!(
+        crate::ecs::world_transform(&world, entity).translation,
+        Vec3::new(12.0, 12.0, 0.0)
+    );
+    assert_eq!(res.expect::<ScriptEngine>().errors().count(), 0);
+}
+
 #[test]
 fn syntax_error_is_recorded_with_file_and_line_and_does_not_crash() {
     let dir = temp_dir("syntax");
