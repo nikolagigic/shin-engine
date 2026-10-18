@@ -67,7 +67,7 @@ Uploads the mesh or texture named by an asset source, or decodes a sound. A mesh
 
 ## `asset.list`
 
-Lists what the open project contains, from its assets/, scenes/, and scripts/ directories: one entry per glTF triangle primitive (kind "mesh"), per image file or glTF image ("texture"), per .scene.ron file ("scene"), and per .rhai file ("script"), each with the `source` string the matching tool takes (asset.load, entity.set_mesh, entity.set_texture, scene.load, script.attach) and the file's path relative to the project.
+Lists what the open project contains, from its assets/, scenes/, and scripts/ directories: one entry per glTF triangle primitive (kind "mesh"), per image file or glTF image ("texture"), per .ogg or .wav file ("audio"), per .scene.ron file ("scene"), and per .rhai file ("script"), each with the `source` string the matching tool takes (asset.load, entity.set_mesh, entity.set_texture, audio.play, entity.set_audio, scene.load, script.attach) and the file's path relative to the project.
 
 Takes no arguments.
 
