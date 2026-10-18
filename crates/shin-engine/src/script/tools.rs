@@ -10,6 +10,7 @@ use super::{Script, ScriptEngine, ScriptError, bindings, script_base};
 use crate::command::Affected;
 use crate::ecs::Entity;
 use crate::headless::Headless;
+use crate::input::Actions;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers `script.attach`, `script.eval`, and `script.errors`.
@@ -34,9 +35,9 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     );
     reg.register(TypedTool::new(
         "script.eval",
-        "Evaluates Rhai source with the script API (vec3, quat_euler, time(), math) and \
-         returns its result as JSON (`result`). Fails with the line and message on a \
-         syntax or runtime error.",
+        "Evaluates Rhai source with the script API (vec3, quat_euler, time(), action_pressed \
+         and friends, math) and returns its result as JSON (`result`). Fails with the line \
+         and message on a syntax or runtime error.",
         script_eval,
     ));
     reg.register(TypedTool::new(
@@ -99,7 +100,10 @@ struct EvalArgs {
 }
 
 fn script_eval(engine: &mut Headless, args: EvalArgs) -> anyhow::Result<ToolOutput> {
-    let value = script_engine(engine).eval(&args.source)?;
+    let actions = crate::script::input::snapshot(engine.resources.get::<Actions>());
+    let scripts = script_engine(engine);
+    *scripts.actions.borrow_mut() = actions;
+    let value = scripts.eval(&args.source)?;
     Ok(ToolOutput::Json(
         json!({ "result": bindings::to_json(&value) }),
     ))

@@ -34,6 +34,10 @@
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
 //! - `Entity`: fields `id` and `name` (read-only) and `transform`.
 //! - `time()`: simulated seconds since play started.
+//! - `action_pressed(name)`, `action_just_pressed(name)`,
+//!   `action_axis(name)`: the input actions bound in `shin.toml` (see
+//!   [`crate::input::Actions`]); an action the project does not define is
+//!   a runtime error.
 //!
 //! Numbers are `f64` in scripts and `f32` in the engine; vector setters
 //! also accept integers, so `v.y = 1` works.
@@ -58,6 +62,7 @@
 //! `script.errors`.
 
 mod bindings;
+mod input;
 mod tools;
 
 use std::cell::{Cell, RefCell};
@@ -74,8 +79,10 @@ pub use tools::register_tools;
 use crate::asset::Assets;
 use crate::ecs::{Entity, Name, Resources, Time, World};
 use crate::headless::PlayState;
+use crate::input::Actions;
 use crate::math::Transform;
 use bindings::{ScriptEntity, ScriptTransform};
+use input::ActionSnapshot;
 
 /// The function every script defines; [`script_system`] calls it as
 /// `update(entity, dt)`.
@@ -143,6 +150,8 @@ pub struct ScriptEngine {
     engine: Engine,
     /// What `time()` returns; set before each batch of calls.
     clock: Rc<Cell<f64>>,
+    /// What the `action_*` functions read; set before each batch of calls.
+    actions: ActionSnapshot,
     /// Loaded scripts by path as written in [`Script`].
     scripts: HashMap<PathBuf, Loaded>,
     /// The latest error of each script, by path as written.
@@ -171,9 +180,12 @@ impl ScriptEngine {
             log::debug!("script {}{pos:?}: {text}", source.unwrap_or(""));
         });
         bindings::register(&mut engine, Rc::clone(&clock));
+        let actions = ActionSnapshot::default();
+        input::register(&mut engine, Rc::clone(&actions));
         Self {
             engine,
             clock,
+            actions,
             scripts: HashMap::new(),
             errors: BTreeMap::new(),
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -185,6 +197,14 @@ impl ScriptEngine {
     /// every call.
     pub fn set_poll_interval(&mut self, interval: Duration) {
         self.poll_interval = interval;
+    }
+
+    /// Makes the `action_*` functions read the current values of
+    /// `actions` (none if `None`) until the next call. [`script_system`]
+    /// does this before every batch of `update` calls; `script.eval` does
+    /// it before evaluating.
+    pub fn set_actions(&mut self, actions: Option<&Actions>) {
+        *self.actions.borrow_mut() = input::snapshot(actions);
     }
 
     /// Reads and compiles the script at `path` (resolved against `base`
@@ -386,12 +406,14 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
     scripted.sort_by_key(|(entity, ..)| entity.to_bits());
 
     let base = script_base(res);
+    let actions = input::snapshot(res.get::<Actions>());
     if res.get::<ScriptEngine>().is_none() {
         res.insert(ScriptEngine::new());
     }
     let scripts = res.expect_mut::<ScriptEngine>();
     scripts.reload_changed(&base);
     scripts.clock.set(t);
+    *scripts.actions.borrow_mut() = actions;
     for (entity, path, transform, name) in scripted {
         let handle = ScriptEntity {
             id: entity.to_bits().get() as rhai::INT,
