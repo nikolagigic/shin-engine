@@ -26,7 +26,8 @@
 //!
 //! A snapshot holds, per entity, the components the editing tools change:
 //! [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`],
-//! [`Children`], [`RigidBody`], and [`Collider`]. Restoring one keeps every
+//! [`Children`], [`AudioSource`], [`RigidBody`], and [`Collider`].
+//! Restoring one keeps every
 //! entity's [`Entity`] id (via `World::spawn_at`), so ids handed out by
 //! `entity.spawn` stay valid across undo and redo. Other components on a
 //! restored entity are kept if it is alive and lost if it is respawned
@@ -60,6 +61,7 @@ use serde_json::Value;
 
 pub use tools::register_tools;
 
+use crate::audio::AudioSource;
 use crate::ecs::{Children, Entity, Name, Parent, World};
 use crate::headless::Headless;
 use crate::math::{Camera, Transform, Vec3};
@@ -119,6 +121,7 @@ struct EntityState {
     instance: Option<MeshInstance>,
     name: Option<Name>,
     script: Option<Script>,
+    audio: Option<AudioSource>,
     parent: Option<Parent>,
     children: Option<Children>,
     body: Option<RigidBody>,
@@ -133,6 +136,7 @@ impl EntityState {
             instance: world.get::<&MeshInstance>(entity).ok().map(|i| *i),
             name: world.get::<&Name>(entity).ok().map(|n| (*n).clone()),
             script: world.get::<&Script>(entity).ok().map(|s| (*s).clone()),
+            audio: world.get::<&AudioSource>(entity).ok().map(|a| (*a).clone()),
             parent: world.get::<&Parent>(entity).ok().map(|p| *p),
             children: world.get::<&Children>(entity).ok().map(|c| (*c).clone()),
             body: world.get::<&RigidBody>(entity).ok().map(|b| *b),
@@ -160,8 +164,9 @@ struct EntitiesSnapshot {
 
 /// The state a tool call touched, captured before or after it: the
 /// affected entities (keyed by [`Entity`] id, each with its
-/// [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`Parent`],
-/// [`Children`], [`RigidBody`], and [`Collider`]), plus the camera, the
+/// [`Transform`], [`MeshInstance`], [`Name`], [`Script`], [`AudioSource`],
+/// [`Parent`], [`Children`], [`RigidBody`], and [`Collider`]), plus the
+/// camera, the
 /// light, or the gravity when the tool changes them.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -273,6 +278,7 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
         let _ = world.remove_one::<MeshInstance>(entity);
         let _ = world.remove_one::<Name>(entity);
         let _ = world.remove_one::<Script>(entity);
+        let _ = world.remove_one::<AudioSource>(entity);
         let _ = world.remove_one::<Parent>(entity);
         let _ = world.remove_one::<Children>(entity);
         let _ = world.remove_one::<RigidBody>(entity);
@@ -297,6 +303,9 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
     }
     if let Some(children) = &state.children {
         world.insert_one(entity, children.clone())?;
+    }
+    if let Some(audio) = &state.audio {
+        world.insert_one(entity, audio.clone())?;
     }
     if let Some(body) = state.body {
         world.insert_one(entity, body)?;

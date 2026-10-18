@@ -14,7 +14,8 @@
 //! pass. Mesh entries spawn (`entity.spawn` at the orbit target) or are
 //! assigned to the selected entity (`entity.set_mesh`); texture entries
 //! are assigned (`entity.set_texture`); scripts are attached
-//! (`script.attach`); scenes are opened (`scene.load`).
+//! (`script.attach`); scenes are opened (`scene.load`); sounds are
+//! previewed (`audio.play`, GE-038).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,6 +132,7 @@ impl AssetBrowser {
         for kind in [
             AssetKind::Mesh,
             AssetKind::Texture,
+            AssetKind::Audio,
             AssetKind::Scene,
             AssetKind::Script,
         ] {
@@ -201,10 +203,12 @@ fn group_title(kind: AssetKind) -> &'static str {
         AssetKind::Texture => "Textures",
         AssetKind::Scene => "Scenes",
         AssetKind::Script => "Scripts",
+        AssetKind::Audio => "Sounds",
     }
 }
 
-/// One entry: its source string (the path on hover) and its buttons.
+/// One entry: its source string (the path on hover) and its
+/// [`row_buttons`].
 fn entry_row(
     ui: &mut Ui,
     entry: &AssetEntry,
@@ -212,62 +216,88 @@ fn entry_row(
     editing: bool,
     actions: &mut Vec<Action>,
 ) {
-    let source = entry.source.to_string();
     ui.horizontal(|ui| {
-        ui.label(&source)
+        ui.label(entry.source.to_string())
             .on_hover_text(entry.relative_path.display().to_string());
-        let with_selection = editing && selection.is_some();
-        match entry.kind {
-            AssetKind::Mesh => {
-                if ui
-                    .add_enabled(editing, egui::Button::new("Spawn"))
-                    .on_hover_text("Add an entity drawing this mesh at the orbit target")
-                    .clicked()
-                {
-                    actions.push(Action::Spawn(source.clone()));
-                }
-                if ui
-                    .add_enabled(with_selection, egui::Button::new("Assign"))
-                    .on_hover_text("Make the selected entity draw this mesh")
-                    .clicked()
-                    && let Some(entity) = selection
-                {
-                    actions.push(Action::Edit(Edit::Mesh(entity, source.clone())));
-                }
-            }
-            AssetKind::Texture => {
-                if ui
-                    .add_enabled(with_selection, egui::Button::new("Assign"))
-                    .on_hover_text("Give the selected entity this base-colour texture")
-                    .clicked()
-                    && let Some(entity) = selection
-                {
-                    actions.push(Action::Edit(Edit::Texture(entity, Some(source.clone()))));
-                }
-            }
-            AssetKind::Script => {
-                if ui
-                    .add_enabled(with_selection, egui::Button::new("Attach"))
-                    .on_hover_text("Attach this script to the selected entity")
-                    .clicked()
-                    && let Some(entity) = selection
-                {
-                    actions.push(Action::Edit(Edit::Script(entity, source.clone())));
-                }
-            }
-            AssetKind::Scene => {
-                if ui
-                    .add_enabled(editing, egui::Button::new("Open"))
-                    .on_hover_text(
-                        "Replace the scene with this file; it becomes the one Save writes",
-                    )
-                    .clicked()
-                {
-                    actions.push(Action::OpenScene(source.clone()));
-                }
+        for button in row_buttons(entry, selection, editing) {
+            if ui
+                .add_enabled(button.enabled, egui::Button::new(button.label))
+                .on_hover_text(button.hover)
+                .clicked()
+                && let Some(action) = button.action
+            {
+                actions.push(action);
             }
         }
     });
+}
+
+/// One button in an entry's row.
+#[derive(Debug, PartialEq)]
+struct RowButton {
+    label: &'static str,
+    hover: &'static str,
+    enabled: bool,
+    /// What a click pushes; `None` when the button needs a selection and
+    /// there is none.
+    action: Option<Action>,
+}
+
+/// The buttons for `entry`, by its kind. Those that edit the scene are
+/// enabled only when `editing`, and those that need a selection only with
+/// one; the sound preview edits nothing and is always enabled.
+fn row_buttons(entry: &AssetEntry, selection: Option<Entity>, editing: bool) -> Vec<RowButton> {
+    let source = entry.source.to_string();
+    let edit = |label, hover, action| RowButton {
+        label,
+        hover,
+        enabled: editing,
+        action: Some(action),
+    };
+    let assign = |label, hover, edit: fn(Entity, String) -> Edit| {
+        let action = selection.map(|entity| Action::Edit(edit(entity, source.clone())));
+        RowButton {
+            label,
+            hover,
+            enabled: editing && action.is_some(),
+            action,
+        }
+    };
+    match entry.kind {
+        AssetKind::Mesh => vec![
+            edit(
+                "Spawn",
+                "Add an entity drawing this mesh at the orbit target",
+                Action::Spawn(source.clone()),
+            ),
+            assign(
+                "Assign",
+                "Make the selected entity draw this mesh",
+                Edit::Mesh,
+            ),
+        ],
+        AssetKind::Texture => vec![assign(
+            "Assign",
+            "Give the selected entity this base-colour texture",
+            |entity, source| Edit::Texture(entity, Some(source)),
+        )],
+        AssetKind::Script => vec![assign(
+            "Attach",
+            "Attach this script to the selected entity",
+            Edit::Script,
+        )],
+        AssetKind::Scene => vec![edit(
+            "Open",
+            "Replace the scene with this file; it becomes the one Save writes",
+            Action::OpenScene(source.clone()),
+        )],
+        AssetKind::Audio => vec![RowButton {
+            label: "▶ Play",
+            hover: "Preview the sound",
+            enabled: true,
+            action: Some(Action::PreviewSound(source.clone())),
+        }],
+    }
 }
 
 /// Every directory and file under `root`'s [`SCANNED_DIRS`], with its
@@ -377,7 +407,9 @@ mod tests {
             sources(&browser),
             [
                 "assets/cube.gltf",
+                "assets/sounds/blip.wav",
                 "scenes/main.scene.ron",
+                "scripts/moon.rhai",
                 "scripts/player.rhai"
             ]
         );
@@ -390,7 +422,7 @@ mod tests {
             !browser.sync(&dir, t0 + Duration::from_millis(500)),
             "not checked before the interval"
         );
-        assert_eq!(sources(&browser).len(), 3);
+        assert_eq!(sources(&browser).len(), 5);
         assert!(
             browser.sync(&dir, t0 + RESCAN_INTERVAL),
             "checked at the interval, and the directory changed"
@@ -400,7 +432,9 @@ mod tests {
             [
                 "assets/checker.png",
                 "assets/cube.gltf",
+                "assets/sounds/blip.wav",
                 "scenes/main.scene.ron",
+                "scripts/moon.rhai",
                 "scripts/player.rhai"
             ]
         );
@@ -414,7 +448,7 @@ mod tests {
         fs::remove_file(dir.join("assets/checker.png"))?;
         browser.invalidate();
         assert!(browser.sync(&dir, t0 + 2 * RESCAN_INTERVAL + Duration::from_millis(1)));
-        assert_eq!(sources(&browser).len(), 3);
+        assert_eq!(sources(&browser).len(), 5);
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
@@ -462,6 +496,91 @@ mod tests {
         assert!(matches_filter(entry, "assets/"));
         assert!(!matches_filter(entry, "sphere"));
         assert_eq!(group_title(entry.kind), "Meshes");
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-038: a sound gets a "▶ Play" button that previews it, enabled
+    /// with no selection and while playing, since it edits nothing.
+    #[test]
+    fn assets_sound_rows_preview_the_sound() -> anyhow::Result<()> {
+        let (root, dir) = demo_project("sound")?;
+        let mut browser = AssetBrowser::default();
+        browser.sync(&dir, Instant::now());
+        let blip = browser
+            .entries()
+            .iter()
+            .find(|e| e.kind == AssetKind::Audio)
+            .expect("the starter blip is listed");
+        assert_eq!(blip.source.to_string(), "assets/sounds/blip.wav");
+        assert_eq!(group_title(blip.kind), "Sounds");
+        let preview = RowButton {
+            label: "▶ Play",
+            hover: "Preview the sound",
+            enabled: true,
+            action: Some(Action::PreviewSound("assets/sounds/blip.wav".to_string())),
+        };
+        let selected = shin::ecs::World::new().spawn(());
+        for (selection, editing) in [(None, true), (Some(selected), true), (None, false)] {
+            assert_eq!(
+                row_buttons(blip, selection, editing),
+                std::slice::from_ref(&preview)
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// The other kinds' buttons are unchanged by the move to
+    /// [`row_buttons`]: edits need `editing`, assigns need a selection.
+    #[test]
+    fn assets_row_buttons_follow_selection_and_play_state() -> anyhow::Result<()> {
+        let (root, dir) = demo_project("buttons")?;
+        let mut browser = AssetBrowser::default();
+        browser.sync(&dir, Instant::now());
+        let entry = |kind| {
+            browser
+                .entries()
+                .iter()
+                .find(|e| e.kind == kind)
+                .expect("the scaffold has one of each kind but textures")
+        };
+        let cube = entry(AssetKind::Mesh);
+        let entity = shin::ecs::World::new().spawn(());
+        let labels = |buttons: &[RowButton]| {
+            buttons
+                .iter()
+                .map(|b| (b.label, b.enabled))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&row_buttons(cube, None, true)),
+            [("Spawn", true), ("Assign", false)]
+        );
+        assert_eq!(
+            labels(&row_buttons(cube, Some(entity), false)),
+            [("Spawn", false), ("Assign", false)]
+        );
+        let buttons = row_buttons(cube, Some(entity), true);
+        assert_eq!(labels(&buttons), [("Spawn", true), ("Assign", true)]);
+        assert_eq!(
+            buttons[1].action,
+            Some(Action::Edit(Edit::Mesh(
+                entity,
+                "assets/cube.gltf".to_string()
+            )))
+        );
+        assert_eq!(
+            row_buttons(entry(AssetKind::Script), Some(entity), true)[0].action,
+            Some(Action::Edit(Edit::Script(
+                entity,
+                "scripts/moon.rhai".to_string()
+            )))
+        );
+        assert_eq!(
+            row_buttons(entry(AssetKind::Scene), None, true)[0].action,
+            Some(Action::OpenScene("scenes/main.scene.ron".to_string()))
+        );
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }

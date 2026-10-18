@@ -9,8 +9,10 @@
 - [The editor](editor.md)
 - [Scenes](scenes.md)
 - [Scripting](scripting.md)
+- [Audio](audio.md)
 - [Physics](physics.md)
 - [Agents and MCP](agents-mcp.md)
+- [Agent skills](agents-skills.md)
 
 # Reference
 

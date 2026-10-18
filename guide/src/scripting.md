@@ -115,6 +115,8 @@ entity really is, read `entity.world_transform`.
 | `action_pressed(name)` | Whether the input action `name` is held. |
 | `action_just_pressed(name)` | Whether `name` went down since the previous step. True in exactly one step per press. |
 | `action_axis(name)` | The value of `name` from -1 to 1. A button action reads 1 while held. |
+| `play_sound(path)` | Plays an `.ogg` or `.wav` file (relative to the project) once, everywhere, at full volume. See [Audio](audio.md). |
+| `play_sound_at(entity, path)` | Plays the file once at `entity`: it fades with the distance from the camera and follows the entity. |
 | `print(x)` | Writes `script: x` to the engine log at info level (the editor's Log panel). |
 | `debug(x)` | Writes to the log at debug level. |
 
@@ -136,6 +138,14 @@ To try a script without a keyboard, play the scene and drive the actions
 with the `input.set` tool. `script.eval` reads the same values, so
 `script.eval {"source": "action_axis(\"move_x\")"}` shows what a script
 would see.
+
+### Sounds
+
+Sounds a script asks for with `play_sound` or `play_sound_at` start
+after every script has run for that step. A sound that cannot be loaded
+(a wrong path, say) is logged as a warning and does not stop the script.
+The starter project's `scripts/moon.rhai` blips once per revolution; see
+[Audio](audio.md#the-starter-project).
 
 Scripts cannot spawn entities, reach other entities, or call other
 scripts. The `script.eval` tool evaluates a Rhai expression with the same

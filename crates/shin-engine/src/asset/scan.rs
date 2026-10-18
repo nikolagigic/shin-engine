@@ -7,6 +7,7 @@
 //! |---------------------------|------------------------------------------------------|
 //! | `assets/**/*.gltf`, `.glb` | one [`AssetKind::Mesh`] per triangle primitive (`path#index`) and one [`AssetKind::Texture`] per image (`path#image=index`) |
 //! | `assets/**/*.png`, `.jpg`, `.jpeg` | one [`AssetKind::Texture`]                   |
+//! | `assets/**/*.ogg`, `.wav` | one [`AssetKind::Audio`]                             |
 //! | `scenes/**/*.scene.ron`   | one [`AssetKind::Scene`]                             |
 //! | `scripts/**/*.rhai`       | one [`AssetKind::Script`]                            |
 //!
@@ -47,16 +48,20 @@ pub enum AssetKind {
     Scene,
     /// A `.rhai` file: `script.attach`.
     Script,
+    /// An `.ogg` or `.wav` file: `audio.play`, `entity.set_audio`.
+    Audio,
 }
 
 impl AssetKind {
-    /// The lower-case name tools use: `mesh`, `texture`, `scene`, `script`.
+    /// The lower-case name tools use: `mesh`, `texture`, `scene`, `script`,
+    /// `audio`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mesh => "mesh",
             Self::Texture => "texture",
             Self::Scene => "scene",
             Self::Script => "script",
+            Self::Audio => "audio",
         }
     }
 }
@@ -70,8 +75,9 @@ impl fmt::Display for AssetKind {
 /// How an entry is named to the tool that uses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntrySource {
-    /// A mesh or texture source for `asset.load`, `entity.set_mesh`, and
-    /// `entity.set_texture`.
+    /// A mesh, texture, or sound source for `asset.load`,
+    /// `entity.set_mesh`, `entity.set_texture`, `audio.play`, and
+    /// `entity.set_audio`.
     Asset(AssetSource),
     /// A scene file path, relative to the project, for `scene.load`.
     Scene(PathBuf),
@@ -115,8 +121,8 @@ impl AssetEntry {
 }
 
 /// Every usable file under `root`'s [`SCANNED_DIRS`], sorted by path then
-/// index: glTF primitives and images, image files, scene files, and
-/// scripts (see [`AssetKind`]). Directories that do not exist are
+/// index: glTF primitives and images, image files, sounds, scene files,
+/// and scripts (see [`AssetKind`]). Directories that do not exist are
 /// skipped, so a project without `scripts/` scans fine.
 ///
 /// Fails if `root` itself or a directory under it cannot be read.
@@ -188,6 +194,12 @@ fn entries_for(root: &Path, relative: &Path) -> Vec<AssetEntry> {
                 path: relative.to_path_buf(),
             }),
             AssetKind::Texture,
+        )],
+        (Some("assets"), "ogg" | "wav") => vec![entry(
+            EntrySource::Asset(AssetSource::Audio {
+                path: relative.to_path_buf(),
+            }),
+            AssetKind::Audio,
         )],
         (Some("scenes"), _) if name.to_ascii_lowercase().ends_with(SCENE_SUFFIX) => vec![entry(
             EntrySource::Scene(relative.to_path_buf()),
@@ -325,9 +337,19 @@ mod tests {
                     "assets/cube.gltf".to_string()
                 ),
                 (
+                    "assets/sounds/blip.wav".to_string(),
+                    "audio",
+                    "assets/sounds/blip.wav".to_string()
+                ),
+                (
                     "scenes/main.scene.ron".to_string(),
                     "scene",
                     "scenes/main.scene.ron".to_string()
+                ),
+                (
+                    "scripts/moon.rhai".to_string(),
+                    "script",
+                    "scripts/moon.rhai".to_string()
                 ),
                 (
                     "scripts/player.rhai".to_string(),
@@ -335,8 +357,9 @@ mod tests {
                     "scripts/player.rhai".to_string()
                 ),
             ],
-            "the starter cube (one primitive, no images), the entry scene, and \
-             the starter player script; cube.bin, src/, and target/ do not show"
+            "the starter cube (one primitive, no images), the moon's blip, the \
+             entry scene, and the starter moon and player scripts; cube.bin, src/, \
+             and target/ do not show"
         );
         assert_eq!(
             entries[0].source,
@@ -347,6 +370,12 @@ mod tests {
         );
         assert_eq!(
             entries[1].source,
+            EntrySource::Asset(AssetSource::Audio {
+                path: PathBuf::from("assets/sounds/blip.wav"),
+            })
+        );
+        assert_eq!(
+            entries[2].source,
             EntrySource::Scene(PathBuf::from("scenes/main.scene.ron"))
         );
         let _ = fs::remove_dir_all(&root);
@@ -366,6 +395,9 @@ mod tests {
         )?;
         fs::copy(assets.join("cube.bin"), dir.join("assets/props/cube.bin"))?;
         fs::copy(assets.join("checker.png"), dir.join("assets/Checker.PNG"))?;
+        // Sounds in any case; an audio file outside assets/ does not count.
+        fs::write(dir.join("assets/sounds/Theme.OGG"), "")?;
+        fs::write(dir.join("scripts/stray.wav"), "")?;
         fs::create_dir_all(dir.join("scripts"))?;
         fs::write(dir.join("scripts/spin.rhai"), "fn update(entity, dt) {}")?;
         fs::write(dir.join("scripts/notes.txt"), "not a script")?;
@@ -400,6 +432,16 @@ mod tests {
                     "assets/props/crate.gltf".to_string()
                 ),
                 (
+                    "assets/sounds/Theme.OGG".to_string(),
+                    "audio",
+                    "assets/sounds/Theme.OGG".to_string()
+                ),
+                (
+                    "assets/sounds/blip.wav".to_string(),
+                    "audio",
+                    "assets/sounds/blip.wav".to_string()
+                ),
+                (
                     "scenes/main.scene.ron".to_string(),
                     "scene",
                     "scenes/main.scene.ron".to_string()
@@ -408,6 +450,11 @@ mod tests {
                     "scenes/other.scene.ron".to_string(),
                     "scene",
                     "scenes/other.scene.ron".to_string()
+                ),
+                (
+                    "scripts/moon.rhai".to_string(),
+                    "script",
+                    "scripts/moon.rhai".to_string()
                 ),
                 (
                     "scripts/player.rhai".to_string(),
@@ -421,8 +468,8 @@ mod tests {
                 ),
             ]
         );
-        // Every mesh and texture source parses back to itself, so the
-        // strings can be handed to asset.load as they are.
+        // Every mesh, texture, and sound source parses back to itself, so
+        // the strings can be handed to asset.load as they are.
         for entry in &entries {
             if let EntrySource::Asset(source) = &entry.source {
                 assert_eq!(&AssetSource::parse(&source.to_string())?, source);
@@ -439,8 +486,9 @@ mod tests {
         let entries = scan(&dir)?;
         assert_eq!(
             rows(&entries).len(),
-            3,
-            "the broken file is skipped (cube, scene, and player script remain): {entries:?}"
+            5,
+            "the broken file is skipped (cube, blip, scene, and the two scripts \
+             remain): {entries:?}"
         );
 
         // A root with none of the directories scans to nothing.

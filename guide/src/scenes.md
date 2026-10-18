@@ -23,10 +23,10 @@ no rotation and unit scale; the blue cube gives only the parts of its
 transform that differ from that. Optional fields that are absent are
 simply left out, without `Some(...)`.
 
-Four optional entity fields do not appear above. `texture` gives a
-base-colour texture, `script` attaches a Rhai script, and `body` and
-`collider` make the entity take part in [physics](physics.md), like this
-fragment of an entity:
+Five optional entity fields do not appear above. `texture` gives a
+base-colour texture, `script` attaches a Rhai script, `audio` attaches a
+sound, and `body` and `collider` make the entity take part in
+[physics](physics.md), like this fragment of an entity:
 
 ```ron
 (
@@ -36,6 +36,7 @@ fragment of an entity:
     color: (0.8, 0.1, 0.1, 1.0),
     texture: "assets/checker.png",
     script: "scripts/orbit.rhai",
+    audio: (source: "assets/sounds/blip.wav", spatial: true),
     body: (kind: dynamic, mass: 2.0),
     collider: (shape: cuboid((0.5, 0.5, 0.5)), friction: 0.5, restitution: 0.0),
 ),
@@ -89,6 +90,7 @@ Each entry of `entities`:
 | `color`     | `(r, g, b, a)` | no   | Linear RGBA tint of the mesh; default white. Ignored without `mesh`. |
 | `texture`   | string     | no       | Base-colour texture, as a texture asset source; none for untextured. Ignored without `mesh`. |
 | `script`    | string     | no       | A `.rhai` file relative to the project directory, run every fixed step while playing; see [Scripting](scripting.md). |
+| `audio`     | audio      | no       | The entity's sound; see [`audio`](#audio) below and [Audio](audio.md). |
 | `body`      | body       | no       | The entity's rigid body; see [Body and collider](#body-and-collider). |
 | `collider`  | collider   | no       | The entity's collision shape; see [Body and collider](#body-and-collider). |
 | `children`  | list of entity | no   | Entities that belong to this one; see [Children](#children). Default empty, and left out when empty. |
@@ -151,6 +153,18 @@ saved from the engine names its values explicitly.
 | `rotation_euler_deg` | `(x, y, z)`  | `(0, 0, 0)`   | Euler angles in degrees, applied intrinsically about X, then Y, then Z, the same convention the `entity.*` tools use. |
 | `scale`              | `(x, y, z)`  | `(1, 1, 1)`   | Per-axis scale. |
 
+### `audio`
+
+| Field      | Type    | Default | Meaning |
+|------------|---------|---------|---------|
+| `source`   | string  | required | The sound, an `.ogg` or `.wav` [asset source](#asset-sources). |
+| `volume`   | number  | `1.0`   | Linear volume. |
+| `looping`  | bool    | `false` | Repeat until stopped. |
+| `spatial`  | bool    | `false` | Fade with the distance from the camera. |
+| `autoplay` | bool    | `false` | Start when play starts. |
+
+Fields at their default are left out when saving.
+
 ## Asset sources
 
 Meshes and textures are named by **asset source** strings, so a scene
@@ -166,8 +180,10 @@ file never depends on runtime handles. The same strings are accepted by
 | `assets/x.gltf#2`       | Triangle primitive 2 of the file, in document order. |
 | `assets/x.png`          | A texture: a PNG or JPEG file (`.png`, `.jpg`, `.jpeg`, any case). |
 | `assets/x.gltf#image=1` | A texture: image 1 of a glTF file, embedded or referenced. |
+| `assets/x.ogg`          | A sound: an Ogg Vorbis or WAV file (`.ogg`, `.wav`, any case). |
 
-The first three rows are meshes, the last two textures. Relative paths
+The first three rows are meshes, the next two textures, and the last a
+sound. Relative paths
 are resolved against the project directory (the engine's working
 directory when no project is open). Each source is uploaded to the GPU
 once and shared by every entity that names it.
@@ -176,8 +192,8 @@ once and shared by every entity that names it.
 
 Saving captures every entity that has a transform, in entity id order,
 with its transform, mesh source, colour, texture source, name, script,
-rigid body, collider, and children nested inside it; plus the camera and
-the light. The physics gravity is not saved. A child
+audio source, rigid body, collider, and children nested inside it; plus
+the camera and the light. The physics gravity is not saved. A child
 whose parent has no transform is written at the top level. Nothing else survives a save and load:
 other components, and entities without a transform, are not in the file.
 That is also what [Play and Stop](editor.md#play-pause-stop) in the editor

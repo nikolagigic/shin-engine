@@ -15,9 +15,12 @@
 //!
 //! Only what a scene file holds survives a play session: entities with a
 //! [`Transform`] (their transform, mesh, colour, texture, name, script,
-//! parent, rigid body, and collider), the
+//! parent, audio source, rigid body, and collider), the
 //! camera, and the light. Other components and entities without a
 //! transform are gone after [`Headless::stop`].
+//!
+//! Audio (GE-036): [`Headless::play`] starts every [`AudioSource`] with
+//! `autoplay` set and [`Headless::stop`] stops every sound.
 //!
 //! Tools: [`register_tools`] adds `sim.play`, `sim.pause`, and `sim.stop`.
 
@@ -29,6 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::Headless;
+use crate::audio::{self, AudioSource};
 use crate::ecs::{Children, Entity, Name, Parent, Time};
 use crate::math::Transform;
 use crate::physics::{Collider, PhysicsWorld, RigidBody};
@@ -117,8 +121,10 @@ impl Headless {
     }
 
     /// Starts playing: snapshots the scene ([`SceneFile::capture`]), the
-    /// entity ids, and [`Time`], and sets [`PlayState::Playing`]. Already
-    /// playing, it resumes if paused and otherwise does nothing.
+    /// entity ids, and [`Time`], sets [`PlayState::Playing`], and starts
+    /// every [`AudioSource`] with `autoplay` set
+    /// ([`audio::play_autoplay_sources`]). Already playing, it resumes if
+    /// paused and otherwise does nothing.
     ///
     /// Fails, leaving the engine in edit mode, if the scene cannot be
     /// captured (a mesh or texture with no asset source, or an
@@ -135,6 +141,7 @@ impl Headless {
             snapshot: Box::new(PlaySnapshot { scene, ids, time }),
             paused: false,
         });
+        audio::play_autoplay_sources(&self.world, &mut self.resources);
         log::info!("play");
         Ok(())
     }
@@ -153,9 +160,9 @@ impl Headless {
         }
     }
 
-    /// Stops playing: tears down the physics simulation, restores the
-    /// scene, entity ids, and [`Time`] captured by [`Self::play`], and sets
-    /// [`PlayState::Edit`]. Returns `false`
+    /// Stops playing: stops every sound, tears down the physics
+    /// simulation, restores the scene, entity ids, and [`Time`] captured
+    /// by [`Self::play`], and sets [`PlayState::Edit`]. Returns `false`
     /// (and changes nothing) if nothing was playing.
     ///
     /// Fails, still playing, if the snapshot cannot be loaded back.
@@ -164,6 +171,7 @@ impl Headless {
             return Ok(false);
         };
         let snapshot = snapshot.clone();
+        audio::stop_all(&mut self.resources);
         let spawned = scene::apply_entities(
             &mut self.world,
             &mut self.resources,
@@ -207,6 +215,7 @@ fn restore_ids(
         Option<Script>,
         Option<Parent>,
         Option<Children>,
+        Option<AudioSource>,
         Option<RigidBody>,
         Option<Collider>,
     );
@@ -229,13 +238,14 @@ fn restore_ids(
                     .get::<&Children>(entity)
                     .ok()
                     .map(|c| Children(c.0.iter().map(|&child| remap(child)).collect())),
+                world.get::<&AudioSource>(entity).ok().map(|a| (*a).clone()),
                 world.get::<&RigidBody>(entity).ok().map(|b| *b),
                 world.get::<&Collider>(entity).ok().map(|c| *c),
             )
         })
         .collect();
     world.clear();
-    for (&id, (transform, instance, name, script, parent, children, body, collider)) in
+    for (&id, (transform, instance, name, script, parent, children, audio, body, collider)) in
         ids.iter().zip(rows)
     {
         let mut builder = hecs::EntityBuilder::new();
@@ -255,6 +265,9 @@ fn restore_ids(
         if let Some(children) = children {
             builder.add(children);
         }
+        if let Some(audio) = audio {
+            builder.add(audio);
+        }
         if let Some(body) = body {
             builder.add(body);
         }
@@ -270,10 +283,10 @@ fn restore_ids(
 pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "sim.play",
-        "Enters play mode: snapshots the scene so sim.stop can restore it, then lets the \
-         simulation run (advance it with sim.step). Resumes if paused. Returns the play \
-         state (`state`: edit, playing, or paused) and `sim_time`, the simulated seconds \
-         since play started.",
+        "Enters play mode: snapshots the scene so sim.stop can restore it, starts every \
+         audio source with autoplay set, then lets the simulation run (advance it with \
+         sim.step). Resumes if paused. Returns the play state (`state`: edit, playing, or \
+         paused) and `sim_time`, the simulated seconds since play started.",
         sim_play,
     ));
     reg.register(TypedTool::new(
@@ -284,11 +297,11 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     ));
     reg.register(TypedTool::new(
         "sim.stop",
-        "Leaves play mode and restores the scene (every entity with its id, transform, \
-         mesh, colour, texture, name, script, parent, rigid body, and collider; the camera; \
-         the light) and the simulation time \
-         to what they were at sim.play. Returns `stopped` (false if nothing was playing), \
-         `state`, and `entities`, the number of entities restored.",
+        "Leaves play mode: stops every sound and restores the scene (every entity with its \
+         id, transform, mesh, colour, texture, name, script, parent, audio, rigid body, and \
+         collider; the camera; the light) and the simulation time to what they were at \
+         sim.play. Returns `stopped` (false if nothing was playing), `state`, and \
+         `entities`, the number of entities restored.",
         sim_stop,
     ));
 }

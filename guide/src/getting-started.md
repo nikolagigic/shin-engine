@@ -62,10 +62,11 @@ cargo run
 The first build compiles the engine for the project (a few minutes), then
 a window opens with the starter scene: a dark ground slab, an orange cube
 turned a little so the light catches three faces, a small pale moon
-circling the cube once every 6.3 seconds, and a stack of five crates that
-drops onto the ground. The orbit is a Rust system in the project's
-`src/main.rs`, the crates fall by [physics](physics.md), and the scene
-itself is `scenes/main.scene.ron`.
+circling the cube once every 6.3 seconds with a short blip each time it
+comes round, and a stack of five crates that drops onto the ground. The
+orbit is a Rust system in the project's `src/main.rs`, the blip is the
+moon's script `scripts/moon.rhai`, the crates fall by
+[physics](physics.md), and the scene itself is `scenes/main.scene.ron`.
 
 Controls, from the starter game:
 

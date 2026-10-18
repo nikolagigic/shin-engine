@@ -24,19 +24,22 @@ use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "asset.load",
-        "Uploads the mesh or texture named by an asset source. A mesh returns \
-         {\"handle\": n} and a texture (PNG/JPEG file or glTF image) returns \
-         {\"texture\": n}; pass them to entity.spawn as `mesh` and `texture`. Loading \
-         the same source again returns the same handle.",
+        "Uploads the mesh or texture named by an asset source, or decodes a sound. A mesh \
+         returns {\"handle\": n} and a texture (PNG/JPEG file or glTF image) returns \
+         {\"texture\": n}; pass them to entity.spawn as `mesh` and `texture`. A sound \
+         (.ogg/.wav) returns {\"sound\": source, \"duration_s\": seconds}; play it with \
+         audio.play or entity.set_audio. Loading the same source again returns the same \
+         handle.",
         asset_load,
     ));
     reg.register(TypedTool::new(
         "asset.list",
         "Lists what the open project contains, from its assets/, scenes/, and scripts/ \
          directories: one entry per glTF triangle primitive (kind \"mesh\"), per image \
-         file or glTF image (\"texture\"), per .scene.ron file (\"scene\"), and per .rhai \
-         file (\"script\"), each with the `source` string the matching tool takes \
-         (asset.load, entity.set_mesh, entity.set_texture, scene.load, script.attach) \
+         file or glTF image (\"texture\"), per .ogg or .wav file (\"audio\"), per \
+         .scene.ron file (\"scene\"), and per .rhai file (\"script\"), each with the \
+         `source` string the matching tool takes (asset.load, entity.set_mesh, \
+         entity.set_texture, audio.play, entity.set_audio, scene.load, script.attach) \
          and the file's path relative to the project.",
         super::scan::asset_list,
     ));
@@ -87,14 +90,25 @@ struct AssetLoadArgs {
     /// "builtin://sphere-<segments>x<rings>", or a glTF path with an optional
     /// triangle-primitive index, e.g. "assets/x.gltf" or "assets/x.gltf#2".
     /// Textures: a .png/.jpg/.jpeg path, e.g. "assets/checker.png", or a
-    /// glTF image, e.g. "assets/x.gltf#image=0". Relative paths are
-    /// resolved against the project directory (the engine's working
-    /// directory).
+    /// glTF image, e.g. "assets/x.gltf#image=0". Sounds: an .ogg/.wav path,
+    /// e.g. "assets/sounds/blip.wav". Relative paths are resolved against
+    /// the project directory (the engine's working directory).
     source: String,
 }
 
 fn asset_load(engine: &mut Headless, args: AssetLoadArgs) -> anyhow::Result<ToolOutput> {
     let source = AssetSource::parse(&args.source)?;
+    if source.is_audio() {
+        let sound = engine
+            .resources
+            .get_mut::<Assets>()
+            .context("no Assets resource")?
+            .sound(&source)?;
+        return Ok(ToolOutput::Json(json!({
+            "sound": source.to_string(),
+            "duration_s": sound.duration().as_secs_f64(),
+        })));
+    }
     if source.is_texture() {
         let texture = with_assets(engine, |assets, gpu, state| {
             assets.texture(&gpu.device, &gpu.queue, &mut state.textures, &source)

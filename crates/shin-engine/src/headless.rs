@@ -19,6 +19,7 @@ use anyhow::Context as _;
 
 use crate::app::RenderFn;
 use crate::asset::Assets;
+use crate::audio::audio_system;
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::input::Actions;
@@ -60,9 +61,9 @@ pub struct Headless {
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
     /// offscreen target, with an empty world and a schedule holding
-    /// [`frame_stats_system`] (frame), then [`script_system`] and
-    /// [`physics_system`] (fixed): [`Self::from_parts`] with empty parts and
-    /// that schedule.
+    /// [`frame_stats_system`] and [`audio_system`] (frame), then
+    /// [`script_system`] and [`physics_system`] (fixed):
+    /// [`Self::from_parts`] with empty parts and that schedule.
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
     /// [`default_light`]; [`default_camera`]; [`PlayState::Edit`]; an [`Assets`] cache
@@ -89,8 +90,9 @@ impl Headless {
     ///
     /// `world` and `schedule` are used as given; nothing is added to the
     /// schedule (add [`frame_stats_system`] for frame statistics,
-    /// [`script_system`] for [`crate::script::Script`]s, and
-    /// [`physics_system`] for rigid bodies). Each
+    /// [`script_system`] for [`crate::script::Script`]s,
+    /// [`audio_system`] for spatial sounds, and [`physics_system`] for
+    /// rigid bodies). Each
     /// resource [`Self::new`] installs that `resources` lacks is inserted
     /// with the same default: [`Time`], [`FrameStats`], a [`RenderState`]
     /// with [`default_light`], [`default_camera`], [`PlayState::Edit`],
@@ -372,12 +374,14 @@ fn check_size((width, height): (u32, u32)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The schedule [`Headless::new`] starts with: [`frame_stats_system`] per
-/// frame, and per fixed step [`script_system`] then [`physics_system`]
-/// (so kinematic bodies follow what scripts did in the same step).
+/// The schedule [`Headless::new`] starts with: [`frame_stats_system`] and
+/// [`audio_system`] per frame, and per fixed step [`script_system`] then
+/// [`physics_system`] (so kinematic bodies follow what scripts did in the
+/// same step).
 fn default_schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_frame("frame_stats", frame_stats_system);
+    schedule.add_frame("audio", audio_system);
     schedule.add_fixed("script", script_system);
     schedule.add_fixed("physics", physics_system);
     schedule

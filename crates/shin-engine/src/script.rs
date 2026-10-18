@@ -40,6 +40,11 @@
 //!   `action_axis(name)`: the input actions bound in `shin.toml` (see
 //!   [`crate::input::Actions`]); an action the project does not define is
 //!   a runtime error.
+//! - `play_sound(path)`: plays an `.ogg` or `.wav` file (an audio asset
+//!   source relative to the project) once, everywhere; `play_sound_at(entity,
+//!   path)` plays it at the entity, so it fades with the distance from the
+//!   camera and follows the entity (GE-036). Sounds queued during a step
+//!   start after every script has run.
 //!
 //! Numbers are `f64` in scripts and `f32` in the engine; vector setters
 //! also accept integers, so `v.y = 1` works.
@@ -78,12 +83,13 @@ use rhai::{AST, CallFnOptions, Dynamic, Engine, Scope};
 
 pub use tools::register_tools;
 
-use crate::asset::Assets;
+use crate::asset::{AssetSource, Assets};
+use crate::audio::{self, PlayParams};
 use crate::ecs::{Entity, Name, Resources, Time, World};
 use crate::headless::PlayState;
 use crate::input::Actions;
 use crate::math::Transform;
-use bindings::{ScriptEntity, ScriptTransform};
+use bindings::{ScriptEntity, ScriptTransform, SoundQueue, SoundRequest};
 use input::ActionSnapshot;
 
 /// The function every script defines; [`script_system`] calls it as
@@ -152,6 +158,8 @@ pub struct ScriptEngine {
     engine: Engine,
     /// What `time()` returns; set before each batch of calls.
     clock: Rc<Cell<f64>>,
+    /// Sounds scripts asked for since [`Self::take_sound_requests`].
+    sounds: SoundQueue,
     /// What the `action_*` functions read; set before each batch of calls.
     actions: ActionSnapshot,
     /// Loaded scripts by path as written in [`Script`].
@@ -175,18 +183,20 @@ impl ScriptEngine {
     /// scripts go to the log.
     pub fn new() -> Self {
         let clock = Rc::new(Cell::new(0.0));
+        let sounds: SoundQueue = Rc::new(RefCell::new(Vec::new()));
         let mut engine = Engine::new();
         engine.set_max_operations(MAX_OPERATIONS);
         engine.on_print(|text| log::info!("script: {text}"));
         engine.on_debug(|text, source, pos| {
             log::debug!("script {}{pos:?}: {text}", source.unwrap_or(""));
         });
-        bindings::register(&mut engine, Rc::clone(&clock));
+        bindings::register(&mut engine, Rc::clone(&clock), Rc::clone(&sounds));
         let actions = ActionSnapshot::default();
         input::register(&mut engine, Rc::clone(&actions));
         Self {
             engine,
             clock,
+            sounds,
             actions,
             scripts: HashMap::new(),
             errors: BTreeMap::new(),
@@ -311,6 +321,12 @@ impl ScriptEngine {
         self.errors.values()
     }
 
+    /// The sounds scripts asked for (`play_sound`, `play_sound_at`) since
+    /// the last call, oldest first, leaving the queue empty.
+    fn take_sound_requests(&mut self) -> Vec<SoundRequest> {
+        std::mem::take(&mut *self.sounds.borrow_mut())
+    }
+
     /// The latest error of the script at `path` (as written in its
     /// [`Script`]), if it has one.
     pub fn error(&self, path: &Path) -> Option<&ScriptError> {
@@ -378,8 +394,10 @@ fn modified(file: &Path) -> Option<SystemTime> {
 }
 
 /// Fixed system: runs `update(entity, dt)` for every entity with a
-/// [`Script`] and a [`Transform`], in entity id order, then writes each
-/// script's transform back.
+/// [`Script`] and a [`Transform`], in entity id order, writes each
+/// script's transform back, then plays the sounds the scripts asked for
+/// (`play_sound`, `play_sound_at`); a sound that cannot be played is
+/// logged.
 ///
 /// Does nothing while editing or paused (see the [module docs](self)).
 /// Inserts a [`ScriptEngine`] if there is none, and first reloads scripts
@@ -434,6 +452,33 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
             *transform = updated;
         }
     }
+    let requests = scripts.take_sound_requests();
+    for request in requests {
+        if let Err(err) = play_requested(res, &request) {
+            log::warn!("script: play_sound({:?}) failed: {err:#}", request.path);
+        }
+    }
+}
+
+/// Plays one [`SoundRequest`]: everywhere, or at (and following) the
+/// entity it names.
+fn play_requested(res: &mut Resources, request: &SoundRequest) -> anyhow::Result<()> {
+    let source = AssetSource::parse(&request.path)?;
+    let (entity, position) = match request.at {
+        Some((id, position)) => (Entity::from_bits(id as u64), Some(position)),
+        None => (None, None),
+    };
+    audio::play(
+        res,
+        &source,
+        PlayParams {
+            volume: 1.0,
+            looping: false,
+            position,
+            entity,
+        },
+    )?;
+    Ok(())
 }
 
 /// The directory script paths are relative to: the [`Assets`] root, or

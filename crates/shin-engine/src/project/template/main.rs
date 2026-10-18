@@ -10,6 +10,7 @@
 //!
 //! Both modes build the same world, systems ([`game_schedule`]), and
 //! resources, so whatever an agent sees under `--mcp` is the game itself.
+//! The moon's script (`scripts/moon.rhai`) blips once per revolution.
 //!
 //! Controls: the arrow keys or a gamepad's left stick move the cube and
 //! Space or its south button lifts it (the `move_x`, `move_z`, and `jump`
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use shin::app::{self, AppConfig, EcsGame};
 use shin::asset::Assets;
+use shin::audio::audio_system;
 use shin::ecs::{ExitRequest, Name, Resources, Schedule, Time, World};
 use shin::gpu::GpuContext;
 use shin::headless::Headless;
@@ -31,6 +33,7 @@ use shin::physics::physics_system;
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
 use shin::scene;
+use shin::script::script_system;
 use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
@@ -78,14 +81,18 @@ fn orbit_system(world: &mut World, res: &mut Resources) {
     }
 }
 
-/// The game's own systems. Add yours here; they run in the window and
-/// under `--mcp` alike. `physics_system` moves the scene's rigid bodies
-/// (under `--mcp`, once `sim.play` has started play mode); keep it after
+/// The game's own systems, plus the engine's script, physics, and audio
+/// systems (so scene scripts run, rigid bodies fall and collide, and
+/// spatial sounds follow the camera). Add yours here; they run in the
+/// window and under `--mcp` alike. Under `--mcp`, scripts and physics
+/// run once `sim.play` has started play mode. Keep `physics` after
 /// systems that move kinematic bodies.
 fn game_schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_fixed("orbit", orbit_system);
+    schedule.add_fixed("script", script_system);
     schedule.add_fixed("physics", physics_system);
+    schedule.add_frame("audio", audio_system);
     schedule
 }
 

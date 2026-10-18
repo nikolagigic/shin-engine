@@ -4,10 +4,12 @@
 //! camera, read-only, with buttons to swap placements with the viewport's
 //! orbit camera ([`scene_camera_ui`]). GE-031: the transform rows are
 //! local to the entity's parent (shown read-only by name), followed by the
-//! read-only world transform. GE-034: a Physics section edits the entity's
-//! rigid body (kind, mass) and collider (shape and size, friction,
-//! restitution); the viewport draws the selected entity's collider as a
-//! translucent shape.
+//! read-only world transform. GE-036: the entity's sound: source, a Play
+//! button that previews it, volume, and the loop, spatial, and autoplay
+//! flags. GE-034: a Physics section edits the entity's rigid body
+//! (kind, mass) and collider (shape and size, friction, restitution);
+//! the viewport draws the selected entity's collider as a translucent
+//! shape.
 //!
 //! The panel keeps its own copy of the values being edited, refreshed from
 //! the world every frame except for the field the user is working on.
@@ -19,12 +21,13 @@
 use std::path::Path;
 
 use egui::{DragValue, Ui};
+use shin::audio::AudioSource;
 use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::headless::Headless;
 use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::physics::{BodyKind, Collider, ColliderShape, RigidBody};
 use shin::render::{MeshInstance, RenderState};
-use shin::scene::TransformDesc;
+use shin::scene::{AudioDesc, TransformDesc};
 use shin::script::{Script, ScriptEngine};
 
 use crate::edit::entity_id;
@@ -61,6 +64,8 @@ pub enum Edit {
     Texture(Entity, Option<String>),
     /// `script.attach` with a `.rhai` path; empty removes the script.
     Script(Entity, String),
+    /// `entity.set_audio` with the whole sound; `None` removes it (GE-036).
+    Audio(Entity, Option<AudioDesc>),
     /// `physics.set_body` (GE-034); `None` removes the body.
     Body(Entity, Option<RigidBody>),
     /// `physics.set_collider` (GE-034); `None` removes the collider.
@@ -78,6 +83,10 @@ pub struct Inspector {
     color: Option<[f32; 4]>,
     mesh: String,
     script: String,
+    /// The sound source field.
+    audio_source: String,
+    /// The volume drag value.
+    audio_volume: f32,
     body: Option<RigidBody>,
     collider: Option<Collider>,
     /// The transform before the preview in progress, if any.
@@ -90,6 +99,9 @@ pub struct Inspector {
     transform_focused: bool,
     mesh_focused: bool,
     script_focused: bool,
+    audio_source_focused: bool,
+    /// Whether the volume is being dragged or typed in.
+    audio_volume_editing: bool,
     /// Whether a physics number is being dragged or typed.
     physics_focused: bool,
 }
@@ -108,6 +120,8 @@ struct Current {
     script: String,
     /// The script's last error, as `path:line: message`.
     script_error: Option<String>,
+    /// The entity's sound, if any.
+    audio: Option<AudioDesc>,
     body: Option<RigidBody>,
     collider: Option<Collider>,
 }
@@ -148,6 +162,10 @@ impl Current {
                 .map(|t| TransformDesc::from_transform(&t)),
             color: instance.map(|i| i.color),
             mesh,
+            audio: world
+                .get::<&AudioSource>(entity)
+                .ok()
+                .map(|a| AudioDesc::from_source(&a)),
             body: world.get::<&RigidBody>(entity).ok().map(|b| *b),
             collider: world.get::<&Collider>(entity).ok().map(|c| *c),
         }
@@ -323,6 +341,7 @@ impl Inspector {
                 self.mesh_row(ui, engine, entity, actions);
                 self.color_row(ui, entity, actions);
                 self.script_row(ui, entity, &current, actions);
+                self.audio_rows(ui, entity, &current, actions);
             });
         if let Some(error) = &current.script_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -362,10 +381,101 @@ impl Inspector {
         if !self.script_focused {
             self.script.clone_from(&current.script);
         }
+        if !self.audio_source_focused {
+            self.audio_source = current
+                .audio
+                .as_ref()
+                .map(|a| a.source.clone())
+                .unwrap_or_default();
+        }
+        if !self.audio_volume_editing {
+            self.audio_volume = current.audio.as_ref().map_or(1.0, |a| a.volume);
+        }
         if !self.physics_focused {
             self.body = current.body;
             self.collider = current.collider;
         }
+    }
+
+    /// The Audio rows (GE-036): the sound's source with a Play button that
+    /// previews it, then, for an entity that has a sound, its volume and
+    /// the Loop, Spatial, and Autoplay flags. The source commits on Enter
+    /// or when it loses focus (empty removes the sound), the volume when
+    /// the drag ends, and each flag when clicked.
+    fn audio_rows(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        current: &Current,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.label("Audio");
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.audio_source)
+                    .hint_text("assets/sounds/x.wav")
+                    .desired_width(130.0),
+            );
+            let source = self.audio_source.trim().to_string();
+            let current_source = current.audio.as_ref().map_or("", |a| a.source.as_str());
+            if response.lost_focus() && source != current_source {
+                let audio = (!source.is_empty()).then(|| AudioDesc {
+                    source: source.clone(),
+                    ..current.audio.clone().unwrap_or_default()
+                });
+                actions.push(Action::Edit(Edit::Audio(entity, audio)));
+            }
+            self.audio_source_focused = response.has_focus();
+            let play = ui
+                .add_enabled(!source.is_empty(), egui::Button::new("▶ Play"))
+                .on_hover_text("Preview the sound");
+            if play.clicked() {
+                actions.push(Action::PreviewSound(source));
+            }
+        });
+        ui.end_row();
+
+        let Some(audio) = &current.audio else {
+            return;
+        };
+        ui.label("Volume");
+        let response = ui.add(
+            DragValue::new(&mut self.audio_volume)
+                .speed(0.01)
+                .range(0.0..=4.0)
+                .max_decimals(2)
+                .update_while_editing(false),
+        );
+        self.audio_volume_editing = response.dragged() || response.has_focus();
+        let finished = response.drag_stopped() || response.lost_focus();
+        if finished && self.audio_volume != audio.volume {
+            actions.push(Action::Edit(Edit::Audio(
+                entity,
+                Some(AudioDesc {
+                    volume: self.audio_volume,
+                    ..audio.clone()
+                }),
+            )));
+        }
+        ui.end_row();
+
+        ui.label("");
+        ui.horizontal(|ui| {
+            let mut flags = audio.clone();
+            let mut changed = ui.checkbox(&mut flags.looping, "Loop").changed();
+            changed |= ui
+                .checkbox(&mut flags.spatial, "Spatial")
+                .on_hover_text("Fade with the distance from the camera")
+                .changed();
+            changed |= ui
+                .checkbox(&mut flags.autoplay, "Autoplay")
+                .on_hover_text("Start when Play is pressed")
+                .changed();
+            if changed {
+                actions.push(Action::Edit(Edit::Audio(entity, Some(flags))));
+            }
+        });
+        ui.end_row();
     }
 
     /// The Physics rows (GE-034): body kind and, for a dynamic body, mass;

@@ -18,6 +18,11 @@
 //! }
 //! ```
 //!
+//! Besides tools, the server offers the engine's agent skills
+//! ([`shin::project::skills`]) as MCP prompts, and the skills and the user
+//! guide's pages as resources (`shin://skills/<name>`,
+//! `shin://guide/<page>`), so a game's own server has them too.
+//!
 //! Every `tools/call` runs through [`shin::command::apply`], so edits made
 //! over MCP are recorded in the engine's history and `history.undo` /
 //! `history.redo` work for them.
@@ -26,6 +31,7 @@
 //! (`env_logger`'s default target).
 
 mod engine_thread;
+mod library;
 mod server;
 
 use anyhow::Context as _;

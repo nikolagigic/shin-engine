@@ -27,9 +27,13 @@ mygame/
   scripts/player.rhai     moves the cube with the input actions
   assets/cube.gltf        the cube mesh the starter scene draws
   assets/cube.bin         its vertex buffer
+  assets/sounds/blip.wav  a 0.2 s blip the moon plays once per revolution
+  scripts/moon.rhai       the moon's script, which plays the blip
   .mcp.json               runs the game with --mcp for agents
   .gitignore              ignores /target
   README.md               how to run, drive, and extend the game
+  CLAUDE.md               project notes for agents
+  .claude/skills/*/SKILL.md  the agent skills, one folder each
 ```
 
 Relative asset and scene paths are resolved against the project
@@ -164,8 +168,10 @@ cargo run -- --mcp   serve this game to an agent over MCP (stdio)
 
 Both modes build the same world, systems, and resources: an `orbit`
 system that moves the entity named `moon` on a circle around the cube,
-the engine's `physics_system` (see [Physics](physics.md)), a
-camera with a 60° field of view (the scene file says where it is), and one
+the engine's script, physics, and audio systems (so the moon's script
+runs, the crates fall by [physics](physics.md), and the blip fades with
+distance), a camera with a 60° field of view (the scene file says where
+it is), and one
 project-defined tool, `game.hello`. Whatever an agent sees under `--mcp`
 is the game itself. [Agents and MCP](agents-mcp.md) covers that mode and
 how to add tools; the full file is below.
@@ -188,12 +194,34 @@ the ground; each has a dynamic rigid body and a box collider, and the
 ground has a fixed one, so they drop into a stack when the simulation
 runs. The camera sits at (0, 2, 5) looking at (0, 0.5, 0), and a warm
 directional light comes from above and in front. Every entity draws
-`assets/cube.gltf`. [Scenes](scenes.md) explains the format.
+`assets/cube.gltf`. The moon also carries `assets/sounds/blip.wav` as a
+spatial audio source and runs `scripts/moon.rhai`, which plays the blip
+each time the moon completes a revolution; see [Audio](audio.md).
+[Scenes](scenes.md) explains the format.
 
 The cube runs `scripts/player.rhai`. The arrow keys or the left stick
 slide it over the ground (`move_x`, `move_z`), and holding Space or the
 gamepad's south button lifts it (`jump`). Let go and it settles back.
 WASD stays on the fly camera.
+
+## Files for agents
+
+`shin new` writes two things for AI agents, in addition to `.mcp.json`:
+
+- **`CLAUDE.md`**, about 40 lines that Claude Code reads at the start of
+  every session in the folder: what the project is, how to run it, the
+  `shin` MCP server from `.mcp.json`, where scenes, scripts, and assets
+  live, and how to add a game tool, with a link to this guide.
+- **`.claude/skills/<name>/SKILL.md`** for each of the
+  [agent skills](agents-skills.md): `shin-scene-building`,
+  `shin-visual-debugging`, `shin-scripting`, and `shin-project`. Claude
+  Code discovers project skills in that folder and uses one when a task
+  matches its description. Other MCP clients get the same skills as
+  prompts from the server.
+
+They are plain files: edit them to describe your game, or add skills of
+your own next to them. A newer engine does not rewrite them; compare with
+the engine's `skills/` folder when you upgrade.
 
 ## Project tools
 
