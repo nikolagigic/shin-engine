@@ -1,9 +1,9 @@
 //! Agent skills (GE-039): how-to guides for AI agents driving Shin through
 //! its tools, one per task.
 //!
-//! The source of truth is `skills/<name>/SKILL.md` in the engine
-//! repository: Markdown with YAML front matter giving `name` and
-//! `description`. They are embedded here so that [`create`](super::create)
+//! The source of truth is `crates/shin-engine/skills/<name>/SKILL.md`
+//! (inside the crate, so it ships with the published package): Markdown
+//! with YAML front matter giving `name` and `description`. They are embedded here so that [`create`](super::create)
 //! writes them into every new project as `.claude/skills/<name>/SKILL.md`
 //! and `shin-mcp` serves them as MCP prompts and `shin://skills/<name>`
 //! resources.
@@ -53,12 +53,12 @@ fn split_front_matter(text: &str) -> (&str, &str) {
         .unwrap_or(("", text))
 }
 
-/// Embeds `skills/<name>/SKILL.md` from the repository root.
+/// Embeds `skills/<name>/SKILL.md` from this crate (`crates/shin-engine/skills/`).
 macro_rules! skill {
     ($name:literal) => {
         Skill {
             name: $name,
-            text: include_str!(concat!("../../../../skills/", $name, "/SKILL.md")),
+            text: include_str!(concat!("../../skills/", $name, "/SKILL.md")),
         }
     };
 }

@@ -4,7 +4,21 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Shin: a small, fast, cross-platform 3D engine that humans, scripts, and AI agents drive through the same API."
+keywords = ["gamedev", "engine", "3d", "wgpu", "mcp"]
+categories = ["game-engines", "graphics", "rendering"]
+# Sources, the agent skills, and the assets `project::create` embeds.
+# Tests, goldens, and examples stay in the repository.
+include = [
+    "src/**",
+    "skills/**",
+    "assets/test/cube.gltf",
+    "assets/test/cube.bin",
+    "assets/sounds/blip.wav",
+]
 
 [lib]
 name = "shin"

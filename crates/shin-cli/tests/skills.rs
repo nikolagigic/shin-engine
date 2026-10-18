@@ -1,4 +1,4 @@
-//! GE-039: the agent skills in the repository's `skills/` folder stay in
+//! GE-039: the agent skills in `crates/shin-engine/skills/` stay in
 //! sync with the engine. Every tool a skill names exists, and every skill
 //! folder is embedded (so `shin-mcp` serves it as a prompt) and written by
 //! `shin new`.
@@ -11,9 +11,9 @@ use std::process::Command;
 use shin::project::skills::SKILLS;
 use shin::tool::ToolRegistry;
 
-/// The repository's `skills/` folder.
+/// The engine crate.s `skills/` folder.
 fn skills_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shin-engine/skills")
 }
 
 /// Extensions that make an `x.y` token a file name rather than a tool.

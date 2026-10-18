@@ -52,8 +52,12 @@ pub mod skills;
 /// Name of the project manifest in a project's root directory.
 pub const MANIFEST: &str = "shin.toml";
 
-/// Git URL of the engine, used by [`EngineDep::Git`] by default.
+/// Git URL of the engine's repository, for [`EngineDep::Git`].
 pub const ENGINE_GIT_URL: &str = "https://github.com/nikolagigic/shin-engine";
+
+/// This engine's version, which new projects depend on by default
+/// ([`EngineDep::CratesIo`]).
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A game project, as described by its `shin.toml`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -199,6 +203,13 @@ impl ProjectRoot {
 /// Where a new project gets `shin-engine` from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineDep {
+    /// The published crates on crates.io, the default: `version` is a Cargo
+    /// version requirement, [`ENGINE_VERSION`] unless chosen otherwise.
+    CratesIo {
+        /// Version requirement, e.g. `"0.1.0"` (which allows any `0.1.x`
+        /// from `0.1.0` up).
+        version: String,
+    },
     /// A git repository, e.g. [`ENGINE_GIT_URL`].
     Git {
         /// Repository URL.
@@ -211,8 +222,8 @@ pub enum EngineDep {
 
 impl Default for EngineDep {
     fn default() -> Self {
-        Self::Git {
-            url: ENGINE_GIT_URL.to_string(),
+        Self::CratesIo {
+            version: ENGINE_VERSION.to_string(),
         }
     }
 }
@@ -487,14 +498,16 @@ fn starter_scene() -> SceneFile {
 }
 
 /// The project's `Cargo.toml`. It depends on the engine and on `shin-mcp`
-/// (for `--mcp`), both from the same place: the git repository, or for
-/// [`EngineDep::Path`] the engine directory and its sibling `shin-mcp`
-/// (`crates/shin-engine` and `crates/shin-mcp` of a checkout). It also
+/// (for `--mcp`), both from the same place: crates.io at the same version,
+/// the git repository, or for [`EngineDep::Path`] the engine directory
+/// and its sibling `shin-mcp` (`crates/shin-engine` and `crates/shin-mcp`
+/// of a checkout). It also
 /// depends on `wgpu` (for `wgpu::Color`), `anyhow`, `env_logger`, `log`,
 /// and `serde` + `schemars` (for tool arguments), at the versions the
 /// engine itself pins.
 fn cargo_toml(name: &str, engine: &EngineDep) -> anyhow::Result<String> {
     let (engine, mcp) = match engine {
+        EngineDep::CratesIo { version } => (toml_string(version), toml_string(version)),
         EngineDep::Git { url } => {
             let dep = format!("{{ git = {} }}", toml_string(url));
             (dep.clone(), dep)
@@ -654,7 +667,7 @@ struct NewArgs {
     /// Parent directory; the project is created in `<dir>/<name>`.
     dir: PathBuf,
     /// Path to a local `crates/shin-engine` to depend on instead of the
-    /// engine's git repository.
+    /// published `shin-engine` on crates.io.
     engine_path: Option<PathBuf>,
 }
 
@@ -846,7 +859,7 @@ mod tests {
         let cargo = fs::read_to_string(dir.join("Cargo.toml"))?;
         assert!(cargo.contains(r#"name = "demo-game""#), "{cargo}");
         assert!(
-            cargo.contains(&format!(r#"git = "{ENGINE_GIT_URL}""#)),
+            cargo.contains(&format!(r#"shin-engine = "{ENGINE_VERSION}""#)),
             "{cargo}"
         );
         let project = Project::load(&dir)?;
@@ -1124,8 +1137,22 @@ mod tests {
     }
 
     #[test]
-    fn git_engine_dep_also_supplies_shin_mcp() -> anyhow::Result<()> {
+    fn default_engine_dep_is_this_version_from_crates_io() -> anyhow::Result<()> {
         let parsed: toml::Table = cargo_toml("x", &EngineDep::default())?.parse()?;
+        for dep in ["shin-engine", "shin-mcp"] {
+            assert_eq!(
+                parsed["dependencies"][dep].as_str(),
+                Some(ENGINE_VERSION),
+                "{dep}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn git_engine_dep_also_supplies_shin_mcp() -> anyhow::Result<()> {
+        let url = ENGINE_GIT_URL.to_string();
+        let parsed: toml::Table = cargo_toml("x", &EngineDep::Git { url })?.parse()?;
         for dep in ["shin-engine", "shin-mcp"] {
             assert_eq!(
                 parsed["dependencies"][dep]["git"].as_str(),

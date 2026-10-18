@@ -134,11 +134,12 @@ The generated `Cargo.toml` depends on `shin-engine` (the engine) and
 `shin-mcp` (so `cargo run -- --mcp` can serve the game to agents), from
 the same place:
 
-- By default, the engine's git repository:
+- By default, crates.io, at the version of the `shin` that created the
+  project (Cargo reads `"0.1.0"` as "0.1.0 or any later 0.1.x"):
 
   ```toml
-  shin-engine = { git = "https://github.com/nikolagigic/shin-engine" }
-  shin-mcp = { git = "https://github.com/nikolagigic/shin-engine" }
+  shin-engine = "0.1.0"
+  shin-mcp = "0.1.0"
   ```
 
 - With `--engine-path <checkout>/crates/shin-engine`, a local checkout.
@@ -221,7 +222,7 @@ WASD stays on the fly camera.
 
 They are plain files: edit them to describe your game, or add skills of
 your own next to them. A newer engine does not rewrite them; compare with
-the engine's `skills/` folder when you upgrade.
+the engine's `crates/shin-engine/skills/` folder when you upgrade.
 
 ## Project tools
 

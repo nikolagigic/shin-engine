@@ -36,8 +36,9 @@ pitfalls.
 
 ## Adding or changing a skill
 
-The source of truth is `skills/<name>/SKILL.md` in the engine
-repository: Markdown with front matter.
+The source of truth is `crates/shin-engine/skills/<name>/SKILL.md` in
+the engine repository: Markdown with front matter. The folder lives
+inside the engine crate so it ships with the published `shin-engine`.
 
 ```markdown
 ---
@@ -64,7 +65,7 @@ Two tests keep the skills honest. Every `` `x.y` `` name in a skill
 that looks like a tool (`entity.spawn`, not `main.rs`) must exist in the
 engine's tool registry, so a renamed tool fails the build until the
 skill is updated; `game.*` names are project tools and are not checked.
-And every folder in `skills/` must be embedded, served as a prompt, and
+And every folder in `crates/shin-engine/skills/` must be embedded, served as a prompt, and
 written by `shin new`:
 
 ```sh

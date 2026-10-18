@@ -47,8 +47,8 @@ enum Command {
         /// Parent directory of the new project.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
-        /// Depend on a local `crates/shin-engine` instead of the engine's
-        /// git repository.
+        /// Depend on a local `crates/shin-engine` instead of the published
+        /// `shin-engine` on crates.io.
         #[arg(long)]
         engine_path: Option<PathBuf>,
     },
