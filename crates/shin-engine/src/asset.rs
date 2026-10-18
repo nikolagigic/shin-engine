@@ -18,9 +18,11 @@
 //!
 //! Tools (GE-015, GE-019): [`register_tools`] adds `asset.load`,
 //! `scene.load_gltf`, and `mesh.builtin`, which all upload through
-//! [`Assets`] into the renderer's mesh registry.
+//! [`Assets`] into the renderer's mesh registry; and (GE-032) `asset.list`,
+//! which returns what [`scan`] finds in the project.
 
 mod registry;
+mod scan;
 mod tools;
 
 use std::f32::consts::PI;
@@ -32,6 +34,7 @@ use glam::{Mat4, Vec3};
 use crate::math::Transform;
 
 pub use registry::{AssetSource, Assets};
+pub use scan::{AssetEntry, AssetKind, EntrySource, SCANNED_DIRS, scan};
 pub use tools::register_tools;
 pub(crate) use tools::with_assets;
 

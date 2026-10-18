@@ -294,14 +294,15 @@ impl ToolRegistry {
     }
 
     /// [`Self::with_builtins`] plus every subsystem's tools: assets
-    /// (`scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
+    /// (`asset.load`, `asset.list`, `scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
     /// `sim.step`), render (`mesh.list`, `camera.set`, `light.set`,
     /// `render.frame`), stats (`stats.summary`), projects
     /// (`project.new`), and scene files (`scene.save`, `scene.load`). This
     /// is the registry
     /// `shin-mcp` serves. History (`history.undo`, `history.redo`) is
-    /// included too, and play mode (`sim.play`, `sim.pause`, `sim.stop`), and
-    /// scripts (`script.attach`, `script.eval`, `script.errors`).
+    /// included too, and play mode (`sim.play`, `sim.pause`, `sim.stop`),
+    /// scripts (`script.attach`, `script.eval`, `script.errors`), and
+    /// input actions (`input.list`, `input.set`).
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
         crate::asset::register_tools(&mut registry);
@@ -313,6 +314,7 @@ impl ToolRegistry {
         crate::command::register_tools(&mut registry);
         crate::headless::register_tools(&mut registry);
         crate::script::register_tools(&mut registry);
+        crate::input::register_tools(&mut registry);
         registry
     }
 

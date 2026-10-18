@@ -10,7 +10,10 @@
 //! Both modes build the same world, systems ([`game_schedule`]), and
 //! resources, so whatever an agent sees under `--mcp` is the game itself.
 //!
-//! Controls: W/S forward and back, A/D strafe, E/Q up and down; hold the
+//! Controls: the arrow keys or a gamepad's left stick move the cube and
+//! Space or its south button lifts it (the `move_x`, `move_z`, and `jump`
+//! actions bound in `shin.toml`, read by `scripts/player.rhai`); W/S
+//! forward and back, A/D strafe, E/Q up and down fly the camera; hold the
 //! right mouse button to look around; Escape quits.
 
 use std::path::{Path, PathBuf};
@@ -21,7 +24,7 @@ use shin::asset::Assets;
 use shin::ecs::{ExitRequest, Name, Resources, Schedule, Time, World};
 use shin::gpu::GpuContext;
 use shin::headless::Headless;
-use shin::input::{FlyCamera, fly_camera_system};
+use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
@@ -157,7 +160,12 @@ fn load_scene(
     Ok(())
 }
 
-/// Plays the game in a window.
+/// Plays the game in a window. The project's input actions (`shin.toml`
+/// `[input.actions]`) are installed as the [`Actions`] resource, which
+/// the engine fills from the keyboard, mouse, and gamepads every frame;
+/// scripts read them with `action_pressed` and friends, and so can your
+/// systems with `res.expect::<Actions>()`. Under `--mcp`,
+/// [`Headless::load_project`] installs them for `input.set`.
 fn run_window(project: Project) -> anyhow::Result<()> {
     let mut schedule = game_schedule();
     schedule.add_frame("fly_camera", fly_camera_system);
@@ -165,6 +173,7 @@ fn run_window(project: Project) -> anyhow::Result<()> {
     game.title = project.window.title.clone();
     add_game_resources(&mut game.resources);
     game.resources.insert(FlyCamera::default());
+    game.resources.insert(Actions::from_config(&project.input));
 
     let scene = entry_scene(&project);
     game.render_fn = Some(Box::new(move |world, res, gpu, color, depth| {

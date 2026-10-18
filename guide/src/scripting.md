@@ -112,8 +112,30 @@ entity really is, read `entity.world_transform`.
 | Function | Meaning |
 |----------|---------|
 | `time()` | Simulated seconds since play started. |
+| `action_pressed(name)` | Whether the input action `name` is held. |
+| `action_just_pressed(name)` | Whether `name` went down since the previous step. True in exactly one step per press. |
+| `action_axis(name)` | The value of `name` from -1 to 1. A button action reads 1 while held. |
 | `print(x)` | Writes `script: x` to the engine log at info level (the editor's Log panel). |
 | `debug(x)` | Writes to the log at debug level. |
+
+### Input actions
+
+Actions are named and bound in the project's `shin.toml`, as
+[Projects](projects.md#input-actions) describes. A script reads them by
+name and never by key, so players can rebind without touching the
+script. Naming an action the project does not define is a runtime error
+that lists the actions that exist.
+
+This is the starter project's `scripts/player.rhai`:
+
+```rhai
+{{#include ../../crates/shin-engine/src/project/template/player.rhai}}
+```
+
+To try a script without a keyboard, play the scene and drive the actions
+with the `input.set` tool. `script.eval` reads the same values, so
+`script.eval {"source": "action_axis(\"move_x\")"}` shows what a script
+would see.
 
 Scripts cannot spawn entities, reach other entities, or call other
 scripts. The `script.eval` tool evaluates a Rhai expression with the same
@@ -177,5 +199,7 @@ and File > Save writes it into the scene.
 | `script.attach` | Attaches a `.rhai` file to an entity (or removes it with an empty path), compiles it, and reports the compile error if any. Undoable. |
 | `script.eval`   | Evaluates Rhai source with the script API and returns its result as JSON. |
 | `script.errors` | Lists the latest compile or runtime error of each script that has one. |
+| `input.set`     | Holds, releases, or sets the axis of an input action on an engine with no devices. |
+| `input.list`    | Lists the input actions with their bindings and current values. |
 
 See the [Tools reference](reference/tools.md).

@@ -1,6 +1,8 @@
 //! The Inspector panel (GE-023): the selected entity's name, transform,
-//! mesh, and colour, editable; and (GE-011) its script path, with the
-//! script's last compile or runtime error. GE-031: the transform rows are
+//! mesh, and colour, editable; (GE-011) its script path, with the
+//! script's last compile or runtime error; and (GE-030) the scene's own
+//! camera, read-only, with buttons to swap placements with the viewport's
+//! orbit camera ([`scene_camera_ui`]). GE-031: the transform rows are
 //! local to the entity's parent (shown read-only by name), followed by the
 //! read-only world transform.
 //!
@@ -16,7 +18,7 @@ use std::path::Path;
 use egui::{DragValue, Ui};
 use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::headless::Headless;
-use shin::math::Transform;
+use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::render::{MeshInstance, RenderState};
 use shin::scene::TransformDesc;
 use shin::script::{Script, ScriptEngine};
@@ -50,6 +52,9 @@ pub enum Edit {
     },
     /// `entity.set_mesh` with an asset source string.
     Mesh(Entity, String),
+    /// `entity.set_texture` with a texture asset source string, or `None`
+    /// to remove the texture (GE-032, from the Assets panel).
+    Texture(Entity, Option<String>),
     /// `script.attach` with a `.rhai` path; empty removes the script.
     Script(Entity, String),
 }
@@ -146,6 +151,65 @@ fn world_rows(ui: &mut Ui, world: &TransformDesc) {
             .on_hover_text("Read-only: the transform above is local to the parent");
         ui.weak(fmt(values));
         ui.end_row();
+    }
+}
+
+/// The "Scene camera" section: the scene's own [`Camera`] (the one Save
+/// writes and Play renders from; the viewport otherwise shows the editor's
+/// orbit camera), read-only, with **View from scene camera**
+/// ([`Action::ViewFromSceneCamera`]) and **Set scene camera from view**
+/// ([`Action::SetSceneCameraFromView`]).
+pub fn scene_camera_ui(ui: &mut Ui, engine: &Headless, actions: &mut Vec<Action>) {
+    ui.strong("Scene camera");
+    let Some(camera) = engine.resources.get::<Camera>() else {
+        ui.weak("No camera");
+        return;
+    };
+    egui::Grid::new("scene_camera_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Position");
+            ui.label(vec3_text(camera.transform.translation));
+            ui.end_row();
+            ui.label("Looking");
+            ui.label(vec3_text(camera.transform.forward()));
+            ui.end_row();
+            ui.label("FOV");
+            ui.label(fov_text(&camera.projection));
+            ui.end_row();
+        });
+    if ui
+        .button("View from scene camera")
+        .on_hover_text("Move the viewport camera to where the scene camera is")
+        .clicked()
+    {
+        actions.push(Action::ViewFromSceneCamera);
+    }
+    if ui
+        .button("Set scene camera from view")
+        .on_hover_text(
+            "Move the scene camera to the viewport camera (undoable; the scene is changed)",
+        )
+        .clicked()
+    {
+        actions.push(Action::SetSceneCameraFromView);
+    }
+}
+
+/// `v` with two decimals, as `(x, y, z)`.
+fn vec3_text(v: Vec3) -> String {
+    format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z)
+}
+
+/// A perspective projection's vertical field of view in degrees, or
+/// `orthographic`.
+fn fov_text(projection: &Projection) -> String {
+    match projection {
+        Projection::Perspective { fov_y_radians, .. } => {
+            format!("{:.1}°", fov_y_radians.to_degrees())
+        }
+        Projection::Orthographic { .. } => "orthographic".to_string(),
     }
 }
 
@@ -404,5 +468,26 @@ impl Inspector {
             }
         }
         ui.end_row();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_camera_text() {
+        assert_eq!(
+            vec3_text(Vec3::new(0.0, 2.0, -5.004)),
+            "(0.00, 2.00, -5.00)"
+        );
+        assert_eq!(
+            fov_text(&Projection::Perspective {
+                fov_y_radians: 60f32.to_radians(),
+                near: 0.1,
+                far: 100.0,
+            }),
+            "60.0°"
+        );
     }
 }

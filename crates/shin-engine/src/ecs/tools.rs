@@ -1,8 +1,8 @@
 //! ECS tools (GE-015): `entity.spawn`, `entity.list`,
 //! `entity.set_transform`, `entity.despawn`, `scene.clear`, `sim.step`;
 //! (GE-023, for granular undo in the editor) `entity.set_name`,
-//! `entity.set_color`, and `entity.set_mesh`; and (GE-031)
-//! `entity.set_parent`.
+//! `entity.set_color`, `entity.set_mesh`; (GE-032) `entity.set_texture`;
+//! and (GE-031) `entity.set_parent`.
 //!
 //! Entities are identified by [`Entity::to_bits`]. Rotations are Euler
 //! angles in degrees `[x, y, z]`, applied in intrinsic X, then Y, then Z
@@ -93,6 +93,17 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          or \"assets/x.gltf#1\"), loading it if needed. Colour and texture are kept; an \
          entity that drew nothing gets a white one. Returns the mesh handle.",
             entity_set_mesh,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "entity.set_texture",
+            "Gives an entity that draws a mesh the base-colour texture named by a texture \
+         asset source (e.g. \"assets/x.png\" or \"assets/x.gltf#image=0\"), loading it if \
+         needed, or removes its texture when `source` is null. Fails if the entity draws \
+         nothing. Returns the texture handle (null when removed).",
+            entity_set_texture,
         )
         .with_affected(named_entity),
     );
@@ -449,6 +460,45 @@ fn entity_set_mesh(engine: &mut Headless, args: SetMeshArgs) -> anyhow::Result<T
     ))
 }
 
+/// Arguments of `entity.set_texture`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetTextureArgs {
+    /// Entity id, as returned by entity.spawn or entity.list.
+    entity: u64,
+    /// Texture asset source: a .png/.jpg/.jpeg path such as
+    /// "assets/checker.png" or a glTF image such as "assets/x.gltf#image=0",
+    /// relative to the project; null removes the entity's texture.
+    source: Option<String>,
+}
+
+fn entity_set_texture(engine: &mut Headless, args: SetTextureArgs) -> anyhow::Result<ToolOutput> {
+    let entity = find_entity(&engine.world, args.entity)?;
+    anyhow::ensure!(
+        engine.world.satisfies::<&MeshInstance>(entity),
+        "entity {} draws no mesh, so it cannot be textured",
+        args.entity
+    );
+    let texture = match &args.source {
+        Some(source) => {
+            let source = AssetSource::parse(source)?;
+            anyhow::ensure!(
+                source.is_texture(),
+                "{source} is a mesh source; entity.set_texture needs a texture source"
+            );
+            Some(with_assets(engine, |assets, gpu, state| {
+                assets.texture(&gpu.device, &gpu.queue, &mut state.textures, &source)
+            })??)
+        }
+        None => None,
+    };
+    let instance = engine.world.query_one_mut::<&mut MeshInstance>(entity)?;
+    instance.texture = texture;
+    Ok(ToolOutput::Json(
+        json!({ "entity": args.entity, "texture": texture.map(|t| t.0) }),
+    ))
+}
+
 /// Arguments of `entity.despawn`.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -777,9 +827,85 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        for name in ["entity.set_name", "entity.set_color", "entity.set_mesh"] {
+        for name in [
+            "entity.set_name",
+            "entity.set_color",
+            "entity.set_mesh",
+            "entity.set_texture",
+        ] {
             assert!(names.contains(&name), "{name} is listed: {names:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn set_texture_loads_removes_and_is_undoable() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let id = call_json(&reg, &mut engine, "entity.spawn", json!({ "mesh": cube }))?["entity"]
+            .clone();
+        let png = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/test/checker.png");
+        let png = png.to_str().expect("UTF-8 path");
+        let out = call_json(
+            &reg,
+            &mut engine,
+            "entity.set_texture",
+            json!({ "entity": id, "source": png }),
+        )?;
+        let handle = out["texture"].as_u64().expect("a texture handle");
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["texture"], handle);
+        // The same source is not uploaded twice.
+        assert_eq!(
+            call_json(&reg, &mut engine, "asset.load", json!({ "source": png }))?,
+            json!({ "texture": handle })
+        );
+
+        let out = call_json(
+            &reg,
+            &mut engine,
+            "entity.set_texture",
+            json!({ "entity": id, "source": null }),
+        )?;
+        assert_eq!(out, json!({ "entity": id, "texture": null }));
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["texture"], Value::Null);
+
+        // Mesh sources, unknown files, and entities without a mesh fail.
+        for bad in ["builtin://cube", "no/such.png"] {
+            let err = reg
+                .call(
+                    &mut engine,
+                    "entity.set_texture",
+                    json!({ "entity": id, "source": bad }),
+                )
+                .unwrap_err();
+            assert!(matches!(err, ToolError::Failed(_)), "{bad}: {err:?}");
+        }
+        let bare = engine.world.spawn((Transform::IDENTITY,));
+        let err = reg
+            .call(
+                &mut engine,
+                "entity.set_texture",
+                json!({ "entity": entity_id(bare), "source": png }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("draws no mesh"), "{err}");
+
+        // Through the history: set, undo (back to none), redo.
+        crate::command::apply(
+            &reg,
+            &mut engine,
+            "entity.set_texture",
+            json!({ "entity": id, "source": png }),
+        )?;
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["texture"], handle);
+        assert!(crate::command::undo(&mut engine)?);
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["texture"], Value::Null, "undone");
+        assert!(crate::command::redo(&mut engine)?);
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["texture"], handle, "redone");
         Ok(())
     }
 
