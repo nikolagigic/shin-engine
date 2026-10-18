@@ -1574,6 +1574,7 @@ mod tests {
                 "assets/cube.gltf",
                 "scenes/main.scene.ron",
                 "scripts/lift.rhai",
+                "scripts/player.rhai",
             ]
         );
         let starter = core.engine.world.len();
