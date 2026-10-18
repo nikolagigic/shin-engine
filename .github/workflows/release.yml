@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - name: cargo build --release
@@ -74,7 +74,7 @@ jobs:
       - name: Install ALSA headers (cpal, for the audio backend)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - name: The tag matches the workspace version
