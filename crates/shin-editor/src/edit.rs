@@ -12,7 +12,7 @@
 use anyhow::Context as _;
 use serde_json::{Value, json};
 use shin::command;
-use shin::ecs::Entity;
+use shin::ecs::{Entity, world_transform};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec3};
 use shin::render::MeshInstance;
@@ -41,7 +41,9 @@ fn apply(
 }
 
 /// Spawns an entity drawing the mesh at asset `source` (for example
-/// `builtin://cube`) at `at`, named `name` if given, and returns it.
+/// `builtin://cube`) at world position `at`, named `name` if given, and
+/// returns it. With a `parent` (GE-031) the entity is spawned as its child:
+/// `at` is converted into the parent's space, so it still appears at `at`.
 ///
 /// The mesh is loaded with `asset.load` (not recorded: loading changes no
 /// entity) and the entity created with one recorded `entity.spawn`.
@@ -51,14 +53,32 @@ pub fn spawn(
     source: &str,
     at: Vec3,
     name: Option<&str>,
+    parent: Option<Entity>,
 ) -> anyhow::Result<Entity> {
     let loaded = apply(reg, engine, "asset.load", json!({ "source": source }))?;
     let mesh = loaded["handle"]
         .as_u64()
         .with_context(|| format!("{source} is not a mesh source"))?;
-    let mut args = json!({ "mesh": mesh, "translation": at.to_array() });
+    let translation = match parent {
+        Some(parent) => {
+            let local = Transform::from_translation(at)
+                .relative_to(&world_transform(&engine.world, parent))
+                .translation;
+            anyhow::ensure!(
+                local.is_finite(),
+                "cannot add under entity #{}: it has a zero scale component",
+                entity_id(parent)
+            );
+            local
+        }
+        None => at,
+    };
+    let mut args = json!({ "mesh": mesh, "translation": translation.to_array() });
     if let Some(name) = name {
         args["name"] = json!(name);
+    }
+    if let Some(parent) = parent {
+        args["parent"] = json!(entity_id(parent));
     }
     let spawned = apply(reg, engine, "entity.spawn", args)?;
     spawned["entity"]
@@ -74,6 +94,28 @@ pub fn despawn(reg: &ToolRegistry, engine: &mut Headless, entity: Entity) -> any
         engine,
         "entity.despawn",
         json!({ "entity": entity_id(entity) }),
+    )?;
+    Ok(())
+}
+
+/// Makes `parent` the parent of `entity` (or makes `entity` a root with
+/// `None`), keeping its world transform, with one recorded
+/// `entity.set_parent` (GE-031).
+pub fn set_parent(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    parent: Option<Entity>,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "entity.set_parent",
+        json!({
+            "entity": entity_id(entity),
+            "parent": parent.map(entity_id),
+            "keep_world": true,
+        }),
     )?;
     Ok(())
 }
@@ -150,6 +192,24 @@ pub fn commit_mesh(
     Ok(())
 }
 
+/// Gives `entity` the base-colour texture at texture asset `source`, or
+/// removes its texture when `source` is `None`, with one recorded
+/// `entity.set_texture`.
+pub fn commit_texture(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    source: Option<&str>,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "entity.set_texture",
+        json!({ "entity": entity_id(entity), "source": source }),
+    )?;
+    Ok(())
+}
+
 /// Attaches the Rhai script at `path` (relative to the project directory)
 /// to `entity`, or removes its script when `path` is empty, with one
 /// recorded `script.attach`. Returns the compile error, if any; the script
@@ -205,6 +265,24 @@ pub fn preview_sound(
     Ok(())
 }
 
+/// Moves the scene's camera to `position`, aimed at `look_at` with +Y up
+/// and keeping its field of view, with one recorded `camera.set` (GE-030:
+/// the Inspector's "Set scene camera from view").
+pub fn commit_camera(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    position: Vec3,
+    look_at: Vec3,
+) -> anyhow::Result<()> {
+    apply(
+        reg,
+        engine,
+        "camera.set",
+        json!({ "position": position.to_array(), "look_at": look_at.to_array() }),
+    )?;
+    Ok(())
+}
+
 /// Writes `desc` into `entity`'s [`Transform`] without recording it.
 /// Does nothing if the entity has no transform.
 pub fn preview_transform(engine: &mut Headless, entity: Entity, desc: &TransformDesc) {
@@ -226,6 +304,7 @@ mod tests {
     use super::*;
     use shin::command::History;
     use shin::ecs::Name;
+    use shin::math::{Camera, Projection};
 
     fn setup() -> anyhow::Result<(ToolRegistry, Headless, Entity)> {
         let reg = ToolRegistry::with_engine_tools();
@@ -236,6 +315,7 @@ mod tests {
             "builtin://cube",
             Vec3::new(1.0, 2.0, 3.0),
             Some("box"),
+            None,
         )?;
         Ok((reg, engine, entity))
     }
@@ -274,8 +354,36 @@ mod tests {
     #[test]
     fn spawn_rejects_an_unknown_builtin() -> anyhow::Result<()> {
         let (reg, mut engine, _) = setup()?;
-        assert!(spawn(&reg, &mut engine, "builtin://torus", Vec3::ZERO, None).is_err());
+        assert!(spawn(&reg, &mut engine, "builtin://torus", Vec3::ZERO, None, None).is_err());
         assert_eq!(undo_len(&engine), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn tree_spawn_under_a_parent_and_set_parent_undo() -> anyhow::Result<()> {
+        let (reg, mut engine, parent) = setup()?;
+        commit_transform(
+            &reg,
+            &mut engine,
+            parent,
+            &TransformDesc {
+                translation: [1.0, 2.0, 3.0],
+                rotation_euler_deg: [0.0, 90.0, 0.0],
+                scale: [2.0, 2.0, 2.0],
+            },
+        )?;
+        let at = Vec3::new(4.0, 0.0, -1.0);
+        let child = spawn(&reg, &mut engine, "builtin://cube", at, None, Some(parent))?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), Some(parent));
+        let world = world_transform(&engine.world, child).translation;
+        assert!(world.abs_diff_eq(at, 1e-5), "added where asked: {world}");
+
+        set_parent(&reg, &mut engine, child, None)?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), None);
+        let world = world_transform(&engine.world, child).translation;
+        assert!(world.abs_diff_eq(at, 1e-5), "keep_world: {world}");
+        command::undo(&mut engine)?;
+        assert_eq!(shin::ecs::parent_of(&engine.world, child), Some(parent));
         Ok(())
     }
 
@@ -365,6 +473,41 @@ mod tests {
         assert_eq!(instance(&engine, entity).color, [1.0; 4]);
         command::redo(&mut engine)?;
         assert_eq!(instance(&engine, entity).color, [0.0, 1.0, 0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_camera_undo_redo_keeps_the_fov() -> anyhow::Result<()> {
+        let (reg, mut engine, _) = setup()?;
+        let before = *engine.resources.expect::<Camera>();
+        let Projection::Perspective { fov_y_radians, .. } = before.projection else {
+            panic!("the default camera is perspective");
+        };
+        commit_camera(
+            &reg,
+            &mut engine,
+            Vec3::new(3.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        )?;
+        let after = *engine.resources.expect::<Camera>();
+        assert_eq!(after.transform.translation, Vec3::new(3.0, 1.0, 0.0));
+        assert!(after.transform.forward().distance(Vec3::NEG_X) < 1e-5);
+        assert!(
+            matches!(after.projection, Projection::Perspective { fov_y_radians: f, .. } if f == fov_y_radians),
+            "{:?}",
+            after.projection
+        );
+        assert_eq!(undo_len(&engine), 2);
+        command::undo(&mut engine)?;
+        assert_eq!(
+            engine.resources.expect::<Camera>().transform,
+            before.transform
+        );
+        command::redo(&mut engine)?;
+        assert_eq!(
+            engine.resources.expect::<Camera>().transform,
+            after.transform
+        );
         Ok(())
     }
 

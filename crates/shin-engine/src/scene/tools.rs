@@ -23,9 +23,10 @@ use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "scene.save",
-        "Saves every entity (name, transform, mesh source, colour), the camera, and the \
-         light to a .scene.ron file, creating missing directories. Returns the path written \
-         and the number of entities.",
+        "Saves every entity (name, transform, mesh source, colour, texture, script, with \
+         children nested under their parent), the camera, and the light to a .scene.ron \
+         file, creating missing directories. Returns the path written and the number of \
+         entities.",
         scene_save,
     ));
     reg.register(

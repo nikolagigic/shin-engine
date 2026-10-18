@@ -22,6 +22,7 @@ use crate::asset::Assets;
 use crate::audio::audio_system;
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
+use crate::input::Actions;
 use crate::math::{Camera, Projection, Transform, Vec3};
 use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
@@ -64,8 +65,9 @@ impl Headless {
     /// and that schedule.
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
-    /// [`default_light`]; [`default_camera`]; [`PlayState::Edit`]; and an [`Assets`] cache
-    /// rooted at the current working directory. [`Self::render_fn`]
+    /// [`default_light`]; [`default_camera`]; [`PlayState::Edit`]; an [`Assets`] cache
+    /// rooted at the current working directory; and empty [`Actions`]
+    /// (a project's are installed by [`Self::load_project`]). [`Self::render_fn`]
     /// draws the world with [`render_world`], so spawning an entity with a
     /// `Transform` and a `MeshInstance` is enough to see it.
     ///
@@ -156,6 +158,9 @@ impl Headless {
             let cwd = std::env::current_dir().context("failed to read the working directory")?;
             resources.insert(Assets::new(cwd));
         }
+        if resources.get::<Actions>().is_none() {
+            resources.insert(Actions::new());
+        }
         let render_fn: RenderFn = Box::new(|world, res, ctx, color, depth| {
             let size = color.texture().size();
             let aspect = size.width as f32 / size.height as f32;
@@ -187,7 +192,8 @@ impl Headless {
     ///
     /// Reads `<dir>/shin.toml`, replaces the [`Assets`] cache with one
     /// rooted at the project, inserts the [`ProjectRoot`] resource (the
-    /// canonical `dir`), resizes the target to the project's window size,
+    /// canonical `dir`), installs the project's input [`Actions`] (all
+    /// released), resizes the target to the project's window size,
     /// and replaces every entity: with the entry scene if the project has
     /// one (which also sets the camera and light it describes), otherwise
     /// with nothing.
@@ -238,6 +244,7 @@ impl Headless {
 
         log::info!("opened project `{}` in {}", project.name, root.0.display());
         self.resources.insert(root);
+        self.resources.insert(Actions::from_config(&project.input));
         self.resize(project.window.width, project.window.height);
         Ok(project)
     }
@@ -255,7 +262,8 @@ impl Headless {
 
     /// Runs `n` fixed steps of [`Self::fixed_dt`], advancing [`Time`]
     /// exactly as [`crate::app::EcsGame`] does (both use
-    /// [`ecs::fixed_step`]).
+    /// [`ecs::fixed_step`]). After each step the [`Actions`] resource's
+    /// `just_pressed` edges are cleared ([`Actions::end_step`]).
     pub fn step(&mut self, n: u32) {
         for _ in 0..n {
             ecs::fixed_step(
@@ -264,6 +272,9 @@ impl Headless {
                 &mut self.schedule,
                 self.fixed_dt,
             );
+            if let Some(actions) = self.resources.get_mut::<Actions>() {
+                actions.end_step();
+            }
         }
     }
 
@@ -277,8 +288,9 @@ impl Headless {
     ///
     /// Sets `Time::frame_dt` and `Time::alpha` to zero (headless frames
     /// have no wall-clock duration and always land on a whole step), runs
-    /// the frame systems, clears the target to [`Self::clear_color`] (depth
-    /// to 1.0), then calls [`Self::render_fn`] if one is installed.
+    /// the frame systems and then [`ecs::propagate_transforms`], clears the
+    /// target to [`Self::clear_color`] (depth to 1.0), then calls
+    /// [`Self::render_fn`] if one is installed.
     pub fn render_to_target(&mut self) {
         if self.resources.get::<Time>().is_none() {
             self.resources.insert(Time::default());
@@ -288,6 +300,7 @@ impl Headless {
         time.alpha = 0.0;
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
+        ecs::propagate_transforms(&mut self.world, &mut self.resources);
 
         self.clear();
         if let Some(render_fn) = &mut self.render_fn {

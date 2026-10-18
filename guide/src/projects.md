@@ -24,6 +24,7 @@ mygame/
   shin.toml               project name, window settings, and entry scene
   src/main.rs             the game: systems, tools, window and --mcp modes
   scenes/main.scene.ron   the starter scene (the entry scene)
+  scripts/player.rhai     moves the cube with the input actions
   assets/cube.gltf        the cube mesh the starter scene draws
   assets/cube.bin         its vertex buffer
   assets/sounds/blip.wav  a 0.2 s blip the moon plays once per revolution
@@ -40,7 +41,8 @@ directory: `assets/cube.gltf` in a scene file means
 
 ## `shin.toml`
 
-The manifest has two tables. This is the one `shin new mygame` writes:
+The manifest has two required tables and an optional `[input]` table.
+This is the one `shin new mygame` writes:
 
 ```toml
 [project]
@@ -51,6 +53,11 @@ entry_scene = "scenes/main.scene.ron"
 title = "mygame"
 width = 1280
 height = 720
+
+[input.actions]
+jump = ["Space", "Gamepad:South"]
+move_x = { axis = ["ArrowLeft", "ArrowRight"], gamepad_axis = "LeftStickX" }
+move_z = { axis = ["ArrowDown", "ArrowUp"], gamepad_axis = "LeftStickY" }
 ```
 
 | Table       | Field         | Meaning |
@@ -63,6 +70,61 @@ height = 720
 
 Unknown fields are an error naming the file. The `project.info` tool
 returns these fields for the open project, re-reading the file each time.
+
+## Input actions
+
+Games read named actions, not keys. `[input.actions]` names each action
+and says what drives it. Scripts read them with `action_pressed`,
+`action_just_pressed`, and `action_axis` (see
+[Scripting](scripting.md#input-actions)). Rust systems read the `Actions`
+resource the same way.
+
+A **button action** is an array of bindings. The action is held while
+any of them is:
+
+```toml
+jump = ["Space", "Gamepad:South"]
+fire = ["Mouse:Left", "KeyF"]
+```
+
+An **axis action** is a table with a value from -1 to 1. `axis` names a
+negative and a positive binding. `gamepad_axis` names a stick or trigger.
+Either may be left out. When both are present, whichever is further from
+zero wins:
+
+```toml
+move_x = { axis = ["KeyA", "KeyD"], gamepad_axis = "LeftStickX" }
+```
+
+| Binding | Written as |
+|---------|------------|
+| A key, by physical position | Its winit `KeyCode` name: `Space`, `KeyA`, `ArrowUp`, `Digit1`, `ShiftLeft`, `Enter`, `F1` |
+| A mouse button | `Mouse:Left`, `Mouse:Right`, `Mouse:Middle` |
+| A gamepad button, on any pad | `Gamepad:` and one of `South`, `East`, `North`, `West`, `C`, `Z`, `LeftTrigger`, `LeftTrigger2`, `RightTrigger`, `RightTrigger2`, `Select`, `Start`, `Mode`, `LeftThumb`, `RightThumb`, `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight` |
+| A gamepad axis (`gamepad_axis`) | `LeftStickX`, `LeftStickY`, `LeftZ`, `RightStickX`, `RightStickY`, `RightZ`, `DPadX`, `DPadY` |
+
+`South` is A on an Xbox pad and Cross on a PlayStation pad. Stick Y is
+positive when pushed up. An unknown name is an error that names it, such
+as ``unknown key `Spce` ``.
+
+An axis action counts as pressed from 0.5 either way. A button action's
+axis is 1 while held and 0 otherwise. `just_pressed` is true from the
+moment an action goes down until one simulation step has run. Each press
+is therefore seen by exactly one step, even a tap shorter than a frame.
+
+The windowed game polls keyboard, mouse, and gamepads every frame.
+Gamepads are found through gilrs and may be plugged in while the game
+runs. Under `--mcp` and in `shin-mcp --project` there are no devices. The
+`input.set` tool drives an action instead, and `input.list` shows every
+action with its binding and value:
+
+```text
+input.set {"action": "move_x", "axis": 1.0}
+input.set {"action": "jump", "pressed": true}
+```
+
+An injected value stays until the next `input.set`. Rebinding from the
+editor is not supported yet; edit `shin.toml` and reopen the project.
 
 ## The engine dependency
 
@@ -129,6 +191,11 @@ comes from above and in front. All three entities draw
 spatial audio source and runs `scripts/moon.rhai`, which plays the blip
 each time the moon completes a revolution; see [Audio](audio.md).
 [Scenes](scenes.md) explains the format.
+
+The cube runs `scripts/player.rhai`. The arrow keys or the left stick
+slide it over the ground (`move_x`, `move_z`), and holding Space or the
+gamepad's south button lifts it (`jump`). Let go and it settles back.
+WASD stays on the fly camera.
 
 ## Project tools
 

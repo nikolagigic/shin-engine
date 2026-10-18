@@ -58,6 +58,41 @@ impl Transform {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 
+    /// `self * local`: where something placed at `local` inside this
+    /// transform's space ends up, as a parent and a child compose (GE-031).
+    ///
+    /// Translation, rotation, and scale compose separately (scale per
+    /// axis). That equals multiplying the matrices unless `self` has a
+    /// non-uniform scale *and* `local` is rotated; the shear that
+    /// combination produces cannot be stored in a `Transform` and is
+    /// dropped.
+    pub fn mul_transform(&self, local: &Transform) -> Transform {
+        Transform {
+            translation: self.translation + self.rotation * (self.scale * local.translation),
+            rotation: self.rotation * local.rotation,
+            scale: self.scale * local.scale,
+        }
+    }
+
+    /// The local transform that, placed inside `parent`
+    /// ([`Self::mul_transform`]), gives `self`: the inverse of composing.
+    /// Scale is divided per axis, so a zero component of `parent.scale`
+    /// gives non-finite values.
+    pub fn relative_to(&self, parent: &Transform) -> Transform {
+        let inverse_rotation = parent.rotation.inverse();
+        Transform {
+            translation: (inverse_rotation * (self.translation - parent.translation))
+                / parent.scale,
+            rotation: inverse_rotation * self.rotation,
+            scale: self.scale / parent.scale,
+        }
+    }
+
+    /// Whether every component is finite.
+    pub fn is_finite(&self) -> bool {
+        self.translation.is_finite() && self.rotation.is_finite() && self.scale.is_finite()
+    }
+
     /// The direction this transform faces (local -Z).
     pub fn forward(&self) -> Vec3 {
         self.rotation * Vec3::NEG_Z
@@ -224,6 +259,68 @@ mod tests {
         assert_eq!(t.rotation, Quat::IDENTITY);
         t.looking_at(t.translation, Vec3::Y);
         assert_eq!(t.rotation, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn mul_transform_places_a_child_in_the_parent_space() {
+        // The GE-031 case: a parent at (1, 0, 0) turned a quarter turn
+        // about Y carries a child at local (1, 0, 0) to world (1, 0, -1).
+        let parent = Transform::from_trs(
+            Vec3::X,
+            Quat::from_rotation_y(90f32.to_radians()),
+            Vec3::ONE,
+        );
+        let child = Transform::from_translation(Vec3::X);
+        let world = parent.mul_transform(&child);
+        assert!(
+            world
+                .translation
+                .abs_diff_eq(Vec3::new(1.0, 0.0, -1.0), EPS),
+            "{}",
+            world.translation
+        );
+        // Composing agrees with the matrices when the scale is uniform.
+        let parent = Transform::from_trs(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.3, -1.1, 2.0),
+            Vec3::splat(2.0),
+        );
+        let child = Transform::from_trs(
+            Vec3::new(-0.5, 4.0, 1.5),
+            Quat::from_rotation_x(0.9),
+            Vec3::new(0.5, 1.5, 3.0),
+        );
+        let composed = parent.mul_transform(&child).to_matrix();
+        let product = parent.to_matrix() * child.to_matrix();
+        assert!(
+            composed.abs_diff_eq(product, 1e-4),
+            "{composed} vs {product}"
+        );
+        assert_eq!(Transform::IDENTITY.mul_transform(&child), child);
+    }
+
+    #[test]
+    fn relative_to_inverts_mul_transform() {
+        let parent = Transform::from_trs(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.3, -1.1, 2.0),
+            Vec3::new(2.0, 0.5, 4.0),
+        );
+        let child = Transform::from_trs(
+            Vec3::new(-0.5, 4.0, 1.5),
+            Quat::from_rotation_x(0.9),
+            Vec3::new(0.5, 1.5, 3.0),
+        );
+        let back = parent.mul_transform(&child).relative_to(&parent);
+        assert!(
+            back.translation.abs_diff_eq(child.translation, EPS),
+            "{back:?}"
+        );
+        assert!(back.rotation.abs_diff_eq(child.rotation, EPS), "{back:?}");
+        assert!(back.scale.abs_diff_eq(child.scale, EPS), "{back:?}");
+        assert!(back.is_finite());
+        let zero_scale = Transform::from_trs(Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO);
+        assert!(!child.relative_to(&zero_scale).is_finite());
     }
 
     #[test]

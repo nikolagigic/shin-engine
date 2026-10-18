@@ -1,11 +1,17 @@
 //! The editor's UI: File, Edit, and View menus above an `egui_dock` area
-//! with six panels: Viewport (centre), Scene (left), Inspector and History
-//! (right), and Log and Console (below the viewport).
+//! with seven panels: Viewport (centre), Scene and Assets (left), Inspector
+//! and History (right), and Log and Console (below the viewport).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
-//! orbit-camera moves. The Scene panel lists entities (click to select) and
-//! adds and deletes them; the Inspector ([`crate::inspector`]) edits the
-//! selected one. Edits are not made here: the UI pushes [`Action`]s that
+//! orbit-camera moves. The Scene panel shows entities as a collapsible tree
+//! (GE-031; click to select, drag a row onto another to reparent, drop it
+//! below the tree or use the right-click menu to unparent) and adds and
+//! deletes them; "+" adds a child of the selection when there is one. The
+//! Inspector ([`crate::inspector`]) edits the selected one and shows the
+//! scene's own camera, with buttons to move the viewport camera to it and
+//! to set it from the viewport (GE-030); the Assets panel
+//! ([`crate::assets`]) lists the project's files and uses them. Edits are
+//! not made here: the UI pushes [`Action`]s that
 //! [`crate::editor::EditorCore`] runs after the UI pass.
 //!
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
@@ -18,18 +24,23 @@
 //! key, and File > Open and Save are greyed out or ignored (entities can
 //! still be selected).
 
+use std::collections::HashMap;
+use std::path::Path;
+
+use egui::collapsing_header::CollapsingState;
 use egui::{
-    Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, TextureId, Ui,
-    WidgetText, pos2,
+    Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, Stroke, StrokeKind,
+    TextureId, Ui, WidgetText, pos2,
 };
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use serde_json::Value;
 use shin::command::History;
-use shin::ecs::{Entity, Name};
+use shin::ecs::{Entity, Name, child_map, parent_of};
 use shin::headless::Headless;
 use shin::math::{Transform, Vec2};
 use shin::scene::TransformDesc;
 
+use crate::assets::AssetBrowser;
 use crate::edit::entity_id;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
@@ -42,6 +53,8 @@ pub enum Tab {
     Viewport,
     /// The entities in the world.
     Scene,
+    /// The project's meshes, textures, scenes, and scripts (GE-032).
+    Assets,
     /// Properties of the selected entity.
     Inspector,
     /// The most recent log lines.
@@ -53,8 +66,9 @@ pub enum Tab {
 }
 
 /// The panels the View menu can hide and show; the Viewport always stays.
-pub const CLOSEABLE_TABS: [Tab; 5] = [
+pub const CLOSEABLE_TABS: [Tab; 6] = [
     Tab::Scene,
+    Tab::Assets,
     Tab::Inspector,
     Tab::History,
     Tab::Log,
@@ -64,6 +78,11 @@ pub const CLOSEABLE_TABS: [Tab; 5] = [
 /// The selected entity, if any (one at a time).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Selection(pub Option<Entity>);
+
+/// The drag-and-drop payload of a Scene panel row: the entity being
+/// dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DraggedEntity(pub Entity);
 
 /// The built-in meshes the Scene panel's "+ Cube" and "+ Sphere" add.
 pub const ADD_BUTTONS: [(&str, &str); 2] = [
@@ -82,8 +101,17 @@ pub enum Action {
     /// Run a console line.
     Console(String),
     /// Add an entity drawing the mesh at this asset source at the orbit
-    /// target, and select it.
+    /// target, as a child of the selected entity if there is one, and
+    /// select it.
     Spawn(String),
+    /// Make `parent` the parent of `entity`, or make `entity` a root with
+    /// `None`, keeping its world transform (GE-031).
+    Reparent {
+        /// The entity that moves in the tree.
+        entity: Entity,
+        /// Its new parent; `None` for a root.
+        parent: Option<Entity>,
+    },
     /// Delete this entity.
     Despawn(Entity),
     /// Show this transform on the entity without recording it (a drag in
@@ -95,11 +123,17 @@ pub enum Action {
     Edit(Edit),
     /// File > Open: load the project's entry scene.
     Open,
+    /// Assets panel Open: load this project-relative scene file and make
+    /// it the one Save writes.
+    OpenScene(String),
     /// File > Save: save to the current scene path.
     Save,
     /// File > Save As: save to this project-relative path and make it the
     /// current one.
     SaveAs(String),
+    /// Assets panel Import: copy the file at this absolute path into the
+    /// project's `assets/` and rescan.
+    Import(String),
     /// Toolbar Play: snapshot the scene and start (or resume) playing.
     Play,
     /// Toolbar Pause: toggle pause while playing.
@@ -108,16 +142,29 @@ pub enum Action {
     Stop,
     /// Play the sound at this asset source once, as a preview (GE-036).
     PreviewSound(String),
+    /// Inspector "View from scene camera": move the viewport's orbit camera
+    /// to the scene camera's placement. Not an edit.
+    ViewFromSceneCamera,
+    /// Inspector "Set scene camera from view": record one `camera.set` that
+    /// moves the scene camera to the viewport's orbit camera.
+    SetSceneCameraFromView,
 }
 
 impl Action {
     /// Whether this action edits the scene or its history, which is not
-    /// allowed while playing. Console lines, the toolbar, and sound
-    /// previews are allowed.
+    /// allowed while playing. Console lines, the toolbar, Import (which
+    /// only copies a file), View from scene camera, and sound previews are
+    /// allowed.
     pub fn is_edit(&self) -> bool {
         !matches!(
             self,
-            Self::Console(_) | Self::Play | Self::Pause | Self::Stop | Self::PreviewSound(_)
+            Self::Console(_)
+                | Self::Import(_)
+                | Self::Play
+                | Self::Pause
+                | Self::Stop
+                | Self::ViewFromSceneCamera
+                | Self::PreviewSound(_)
         )
     }
 }
@@ -159,16 +206,17 @@ pub fn parse_console_line(line: &str) -> Result<(&str, Value), String> {
     Ok((tool, args))
 }
 
-/// The initial layout: Scene takes the left 18%, Inspector the right 22%
-/// of what remains with History under it, and Log and Console share the
-/// bottom quarter under the Viewport side by side.
+/// The initial layout: Scene takes the left 18% with Assets under it,
+/// Inspector the right 22% of what remains with History under it, and Log
+/// and Console share the bottom quarter under the Viewport side by side.
 ///
 /// An `egui_dock` split fraction is the share of the left (or top) child,
 /// whichever side the new tabs go on.
 pub fn default_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);
     let surface = dock.main_surface_mut();
-    let [centre, _scene] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Scene]);
+    let [centre, scene] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Scene]);
+    let [_scene, _assets] = surface.split_below(scene, 0.5, vec![Tab::Assets]);
     let [centre, inspector] = surface.split_right(centre, 0.78, vec![Tab::Inspector]);
     let [_inspector, _history] = surface.split_below(inspector, 0.55, vec![Tab::History]);
     let [_viewport, log] = surface.split_below(centre, 0.75, vec![Tab::Log]);
@@ -214,6 +262,10 @@ pub struct EditorUi<'a> {
     pub selection: &'a mut Selection,
     /// The Inspector's edit buffers.
     pub inspector: &'a mut Inspector,
+    /// The Assets panel's entries and fields.
+    pub assets: &'a mut AssetBrowser,
+    /// The open project's directory, which the Assets panel scans.
+    pub project_dir: &'a Path,
     /// Text fields of the Scene panel and File menu.
     pub fields: &'a mut Fields,
     /// The scene file Save writes, relative to the project; shown in the
@@ -457,25 +509,144 @@ impl EditorUi<'_> {
         });
     }
 
-    /// The entities that have a transform, in id order; clicking one
-    /// selects it.
+    /// The entities that have a transform as a tree: roots in id order,
+    /// each with its children (in id order) in a collapsible branch.
+    /// Clicking a row selects it. While editing, dragging a row onto
+    /// another makes it that entity's child, dropping it on the space below
+    /// the tree makes it a root, and a row's right-click menu has Unparent.
     fn entity_list(&mut self, ui: &mut Ui) {
-        let mut rows: Vec<(Entity, String)> = self
-            .engine
-            .world
+        let world = &self.engine.world;
+        let mut labels: HashMap<Entity, String> = world
             .query::<(Entity, &Transform, Option<&Name>)>()
             .iter()
             .map(|(entity, _, name)| (entity, entity_label(entity, name)))
             .collect();
-        rows.sort_by_key(|(entity, _)| entity_id(*entity));
-        if rows.is_empty() {
+        let children = child_map(world);
+        // A child whose parent has no transform is listed as a root.
+        let mut roots: Vec<Entity> = labels
+            .keys()
+            .copied()
+            .filter(|&e| !parent_of(world, e).is_some_and(|p| labels.contains_key(&p)))
+            .collect();
+        roots.sort_by_key(|e| entity_id(*e));
+        if roots.is_empty() {
             ui.weak("No entities");
         }
-        for (entity, label) in rows {
-            let selected = self.selection.0 == Some(entity);
-            if ui.selectable_label(selected, label).clicked() {
-                self.selection.0 = Some(entity);
+        let editing = !self.engine.play_state().is_playing();
+        for root in roots {
+            self.tree_node(ui, root, &children, &mut labels, editing);
+        }
+        if editing {
+            // The rest of the panel is a drop target that unparents.
+            let width = ui.available_width();
+            let height = ui.available_height().max(24.0);
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+            if response.dnd_hover_payload::<DraggedEntity>().is_some() {
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    ui.visuals().selection.stroke,
+                    StrokeKind::Inside,
+                );
             }
+            if let Some(dragged) = response.dnd_release_payload::<DraggedEntity>() {
+                self.reparent(dragged.0, None);
+            }
+        }
+    }
+
+    /// One row of the tree and, if `entity` has children, its collapsible
+    /// branch (open by default). `labels` holds the rows not drawn yet, so
+    /// each entity is drawn once.
+    fn tree_node(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        children: &HashMap<Entity, Vec<Entity>>,
+        labels: &mut HashMap<Entity, String>,
+        editing: bool,
+    ) {
+        let Some(label) = labels.remove(&entity) else {
+            return;
+        };
+        let kids: Vec<Entity> = children
+            .get(&entity)
+            .map(|kids| {
+                kids.iter()
+                    .copied()
+                    .filter(|k| labels.contains_key(k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if kids.is_empty() {
+            ui.horizontal(|ui| {
+                // Line up with rows that have a collapse arrow.
+                ui.add_space(ui.spacing().indent);
+                self.tree_row(ui, entity, label, editing);
+            });
+            return;
+        }
+        let id = ui.make_persistent_id(("scene_tree", entity_id(entity)));
+        let _ = CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| self.tree_row(ui, entity, label, editing))
+            .body(|ui| {
+                for kid in kids {
+                    self.tree_node(ui, kid, children, labels, editing);
+                }
+            });
+    }
+
+    /// A selectable row; while editing also a drag source, a drop target
+    /// (reparent onto this entity), and a right-click menu with Unparent.
+    fn tree_row(&mut self, ui: &mut Ui, entity: Entity, label: String, editing: bool) {
+        let selected = self.selection.0 == Some(entity);
+        let sense = if editing {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let response = ui.add(egui::Button::selectable(selected, label).sense(sense));
+        if response.clicked() {
+            self.selection.0 = Some(entity);
+        }
+        if !editing {
+            return;
+        }
+        response.dnd_set_drag_payload(DraggedEntity(entity));
+        if response
+            .dnd_hover_payload::<DraggedEntity>()
+            .is_some_and(|dragged| dragged.0 != entity)
+        {
+            ui.painter().rect_stroke(
+                response.rect,
+                2.0,
+                Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                StrokeKind::Outside,
+            );
+        }
+        if let Some(dragged) = response.dnd_release_payload::<DraggedEntity>()
+            && dragged.0 != entity
+        {
+            self.reparent(dragged.0, Some(entity));
+        }
+        let has_parent = parent_of(&self.engine.world, entity).is_some();
+        response.context_menu(|ui| {
+            if ui
+                .add_enabled(has_parent, egui::Button::new("Unparent"))
+                .clicked()
+            {
+                self.reparent(entity, None);
+                ui.close();
+            }
+        });
+    }
+
+    /// Asks for `entity` to move under `parent` (or to the top level with
+    /// `None`), unless it is already there.
+    fn reparent(&mut self, entity: Entity, parent: Option<Entity>) {
+        if parent_of(&self.engine.world, entity) != parent {
+            self.actions.push(Action::Reparent { entity, parent });
         }
     }
 
@@ -563,12 +734,24 @@ impl TabViewer for EditorUi<'_> {
         match tab {
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Scene => self.scene_ui(ui),
+            Tab::Assets => {
+                let editing = !self.engine.play_state().is_playing();
+                self.assets.ui(
+                    ui,
+                    self.project_dir,
+                    self.selection.0,
+                    editing,
+                    self.actions,
+                );
+            }
             Tab::Inspector => {
                 // Read-only while playing: it still shows the live values.
                 let editing = !self.engine.play_state().is_playing();
                 ui.add_enabled_ui(editing, |ui| {
                     self.inspector
                         .ui(ui, self.engine, self.selection.0, self.actions);
+                    ui.separator();
+                    crate::inspector::scene_camera_ui(ui, self.engine, self.actions);
                 });
             }
             Tab::Log => self.log_ui(ui),
@@ -589,7 +772,7 @@ impl TabViewer for EditorUi<'_> {
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
             Tab::Viewport | Tab::Log | Tab::Console => [false, false],
-            Tab::Scene | Tab::Inspector | Tab::History => [true, true],
+            Tab::Scene | Tab::Assets | Tab::Inspector | Tab::History => [true, true],
         }
     }
 }
@@ -625,7 +808,7 @@ fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
     let surface = dock.main_surface_mut();
     let root = NodeIndex::root();
     match tab {
-        Tab::Scene => {
+        Tab::Scene | Tab::Assets => {
             surface.split_left(root, 0.18, vec![tab]);
         }
         Tab::Inspector | Tab::History => {
@@ -647,6 +830,7 @@ mod tests {
         for tab in [
             Tab::Viewport,
             Tab::Scene,
+            Tab::Assets,
             Tab::Inspector,
             Tab::Log,
             Tab::History,

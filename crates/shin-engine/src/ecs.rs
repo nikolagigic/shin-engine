@@ -10,9 +10,15 @@
 //! [`crate::app::EcsGame`] wires a world, resources, and schedule into the
 //! game loop.
 //!
+//! Hierarchy (GE-031, [`hierarchy`]): a [`Parent`] makes an entity's
+//! [`Transform`](crate::math::Transform) local to another entity;
+//! [`propagate_transforms`] writes the resulting [`GlobalTransform`]s at
+//! the end of every fixed step and before every render.
+//!
 //! Tools (GE-015): [`register_tools`] adds the `entity.*` tools,
 //! `scene.clear`, and `sim.step`.
 
+pub mod hierarchy;
 mod tools;
 
 use std::any::{Any, TypeId, type_name};
@@ -20,6 +26,10 @@ use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
 pub use hecs::{Entity, Query, QueryBorrow, With, Without};
+pub use hierarchy::{
+    Children, GlobalTransform, Parent, child_map, despawn_recursive, parent_of,
+    propagate_transforms, set_parent, subtree, world_transform,
+};
 pub use tools::register_tools;
 
 /// The set of entities and their components.
@@ -145,8 +155,10 @@ pub struct Name(pub String);
 pub struct ExitRequest(pub bool);
 
 /// Runs one fixed simulation step: advances the [`Time`] resource by `dt`
-/// (inserting a default `Time` first if it is missing), then runs the
-/// schedule's fixed systems, so step `k` sees `fixed_steps == k`.
+/// (inserting a default `Time` first if it is missing), runs the
+/// schedule's fixed systems, so step `k` sees `fixed_steps == k`, and then
+/// [`propagate_transforms`], so every [`GlobalTransform`] reflects what the
+/// systems did.
 ///
 /// This is the single fixed-step code path shared by
 /// [`crate::app::EcsGame`] and [`crate::headless::Headless`].
@@ -156,6 +168,7 @@ pub fn fixed_step(world: &mut World, res: &mut Resources, schedule: &mut Schedul
     }
     res.expect_mut::<Time>().advance_fixed(dt);
     schedule.run_fixed(world, res);
+    propagate_transforms(world, res);
 }
 
 /// A system: a plain function over the world and resources.

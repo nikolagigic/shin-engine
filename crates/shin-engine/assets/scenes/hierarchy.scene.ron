@@ -1,0 +1,49 @@
+// GE-031: a parent cube with two child spheres (tests/golden_hierarchy.rs).
+// The children sit at local (+-1.5, 0, 0); the parent is turned a quarter
+// turn about Y, so in the world they end up in front of and behind the
+// cube, not beside it. Rendered at 128x128 under the default camera and
+// light it matches tests/golden/hierarchy.png.
+(
+    version: 1,
+    camera: (
+        position: (0.0, 2.0, 5.0),
+        look_at: (0.0, 0.0, 0.0),
+        fov_y_deg: 45.0,
+    ),
+    light: (
+        direction: (1.0, -2.0, -1.0),
+        color: (1.0, 1.0, 1.0),
+        ambient: (0.1, 0.1, 0.1),
+    ),
+    entities: [
+        (
+            name: "body",
+            transform: (
+                rotation_euler_deg: (0.0, 90.0, 0.0),
+                scale: (0.8, 0.8, 0.8),
+            ),
+            mesh: "builtin://cube",
+            color: (0.8, 0.25, 0.1, 1.0),
+            children: [
+                (
+                    name: "front",
+                    transform: (
+                        translation: (-1.5, 0.0, 0.0),
+                        scale: (0.4, 0.4, 0.4),
+                    ),
+                    mesh: "builtin://sphere",
+                    color: (0.2, 0.6, 1.0, 1.0),
+                ),
+                (
+                    name: "back",
+                    transform: (
+                        translation: (1.5, 0.0, 0.0),
+                        scale: (0.4, 0.4, 0.4),
+                    ),
+                    mesh: "builtin://sphere",
+                    color: (0.3, 0.9, 0.3, 1.0),
+                ),
+            ],
+        ),
+    ],
+)

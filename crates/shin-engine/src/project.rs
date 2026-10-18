@@ -14,15 +14,17 @@
 //! height = 720
 //! ```
 //!
-//! [`create`] writes the starter project: `Cargo.toml`, `shin.toml`,
+//! [`create`] writes the starter project: `Cargo.toml`, `shin.toml` (with
+//! the `jump`, `move_x`, and `move_z` input actions; GE-033),
 //! `src/main.rs` (the game: it plays `scenes/main.scene.ron` in a window
 //! with the fly camera and an orbit system of its own, or with `--mcp`
 //! serves the same world, systems, and a `game.hello` tool over MCP; GE-027),
 //! `scenes/main.scene.ron` (a lit cube on a ground slab with a small moon
-//! orbiting it, the project's entry scene), `assets/cube.gltf` +
-//! `assets/cube.bin`, `assets/sounds/blip.wav` + `scripts/moon.rhai` (the
-//! moon blips once per revolution; GE-036), `.mcp.json` (runs the game
-//! with `--mcp`), `.gitignore`, and `README.md`.
+//! orbiting it, the project's entry scene), `scripts/player.rhai` (moves
+//! the cube with those actions), `assets/cube.gltf` + `assets/cube.bin`,
+//! `assets/sounds/blip.wav` + `scripts/moon.rhai` (the moon blips once per
+//! revolution; GE-036), `.mcp.json` (runs the game with `--mcp`),
+//! `.gitignore`, and `README.md`.
 //!
 //! An open project (GE-026, [`Headless::open_project`]) is marked by the
 //! [`ProjectRoot`] resource; the `project.open` and `project.info` tools
@@ -36,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::headless::Headless;
+use crate::input::InputConfig;
 use crate::scene::{AudioDesc, CameraDesc, EntityDesc, LightDesc, SceneFile, TransformDesc};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
@@ -55,6 +58,9 @@ pub struct Project {
     /// The scene loaded at start-up, relative to the project root, e.g.
     /// `scenes/main.scene.ron`. [`Headless::open_project`] loads it.
     pub entry_scene: Option<PathBuf>,
+    /// The `[input]` table: named actions and their bindings. Empty when
+    /// the manifest has none.
+    pub input: InputConfig,
 }
 
 /// The game window's initial title and size, the `[window]` table of
@@ -79,12 +85,15 @@ impl Default for WindowSettings {
     }
 }
 
-/// The on-disk layout of `shin.toml`: `[project]` and `[window]` tables.
+/// The on-disk layout of `shin.toml`: `[project]`, `[window]`, and an
+/// optional `[input]` table.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestFile {
     project: ProjectTable,
     window: WindowSettings,
+    #[serde(default, skip_serializing_if = "InputConfig::is_empty")]
+    input: InputConfig,
 }
 
 /// The `[project]` table of `shin.toml`.
@@ -98,7 +107,7 @@ struct ProjectTable {
 
 impl Project {
     /// A project called `name` with a window titled `name` and the default
-    /// size, and no entry scene.
+    /// size, no entry scene, and no input actions.
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -107,6 +116,7 @@ impl Project {
                 ..Default::default()
             },
             entry_scene: None,
+            input: InputConfig::default(),
         }
     }
 
@@ -121,6 +131,7 @@ impl Project {
             name: file.project.name,
             window: file.window,
             entry_scene: file.project.entry_scene,
+            input: file.input,
         })
     }
 
@@ -138,6 +149,7 @@ impl Project {
                 entry_scene: self.entry_scene.clone(),
             },
             window: self.window.clone(),
+            input: self.input.clone(),
         };
         Ok(toml::to_string(&file)?)
     }
@@ -232,6 +244,12 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
 /// The starter `src/main.rs`. It reads its window settings from `shin.toml`
 /// at run time, so it needs no substitution.
 const MAIN_RS: &str = include_str!("project/template/main.rs");
+/// The starter's player script, attached to the cube: moves it with the
+/// `move_x`, `move_z`, and `jump` actions of [`starter_input`].
+const PLAYER_RHAI: &str = include_str!("project/template/player.rhai");
+/// Where [`create`] writes the starter's player script, relative to the
+/// project root; the starter scene's cube refers to it.
+pub const STARTER_SCRIPT: &str = "scripts/player.rhai";
 /// The glTF cube the starter scene draws, copied into `assets/`.
 const CUBE_GLTF: &[u8] = include_bytes!("../assets/test/cube.gltf");
 /// The cube's vertex buffer, referenced by [`CUBE_GLTF`] as `cube.bin`.
@@ -246,7 +264,7 @@ const MOON_RHAI: &str = include_str!("project/template/moon.rhai");
 /// Where [`create`] writes the starter sound, relative to the project root.
 pub const STARTER_SOUND: &str = "assets/sounds/blip.wav";
 /// Where [`create`] writes the moon's script, relative to the project root.
-pub const STARTER_SCRIPT: &str = "scripts/moon.rhai";
+pub const MOON_SCRIPT: &str = "scripts/moon.rhai";
 
 /// Creates a new project in `opts.dir` and returns the files written, in
 /// order, as paths under `opts.dir`.
@@ -268,15 +286,17 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
 
     let mut project = Project::new(&opts.name);
     project.entry_scene = Some(PathBuf::from(STARTER_SCENE));
-    let files: [(&str, Vec<u8>); 11] = [
+    project.input = starter_input();
+    let files: [(&str, Vec<u8>); 12] = [
         ("Cargo.toml", cargo_toml(&opts.name, &opts.engine)?.into()),
         (MANIFEST, project.to_toml()?.into()),
         ("src/main.rs", MAIN_RS.into()),
         (STARTER_SCENE, starter_scene().to_ron()?.into()),
+        (STARTER_SCRIPT, PLAYER_RHAI.into()),
         ("assets/cube.gltf", CUBE_GLTF.into()),
         ("assets/cube.bin", CUBE_BIN.into()),
         (STARTER_SOUND, BLIP_WAV.into()),
-        (STARTER_SCRIPT, MOON_RHAI.into()),
+        (MOON_SCRIPT, MOON_RHAI.into()),
         (".mcp.json", MCP_JSON.into()),
         (".gitignore", "/target\n".into()),
         ("README.md", readme(&opts.name).into()),
@@ -312,18 +332,35 @@ const MCP_JSON: &str = r#"{
 }
 "#;
 
+/// The starter project's input actions: `jump` on Space or the gamepad's
+/// south button, `move_x` on the left/right arrows or the left stick, and
+/// `move_z` on the down/up arrows or the left stick (up and `ArrowUp` are
+/// `+1`). The arrows rather than WASD, which the fly camera uses.
+fn starter_input() -> InputConfig {
+    toml::from_str(
+        r#"
+        [actions]
+        jump = ["Space", "Gamepad:South"]
+        move_x = { axis = ["ArrowLeft", "ArrowRight"], gamepad_axis = "LeftStickX" }
+        move_z = { axis = ["ArrowDown", "ArrowUp"], gamepad_axis = "LeftStickY" }
+        "#,
+    )
+    .expect("the starter input config is valid")
+}
+
 /// The starter scene, drawn with the project's `assets/cube.gltf`: a
-/// ground slab, a cube on it, and a small `moon` beside the cube. The
-/// template's orbit system moves the moon; it starts where that system
-/// puts it at time zero, `(1.6, 0.5, 0)`. The moon carries the starter
-/// sound as a spatial [`AudioDesc`] and the script [`STARTER_SCRIPT`],
-/// which plays it once per revolution (GE-036).
+/// ground slab, a cube on it driven by [`STARTER_SCRIPT`], and a small
+/// `moon` beside the cube. The template's orbit system moves the moon; it
+/// starts where that system puts it at time zero, `(1.6, 0.5, 0)`. The
+/// moon carries the starter sound as a spatial [`AudioDesc`] and the
+/// script [`MOON_SCRIPT`], which plays it once per revolution (GE-036).
 fn starter_scene() -> SceneFile {
     let cube = |name: &str, transform: TransformDesc, color: [f32; 4]| EntityDesc {
         name: Some(name.to_string()),
         transform,
         mesh: Some("assets/cube.gltf".to_string()),
         color: Some(color),
+        script: (name == "cube").then(|| STARTER_SCRIPT.to_string()),
         ..Default::default()
     };
     SceneFile {
@@ -348,7 +385,8 @@ fn starter_scene() -> SceneFile {
                 },
                 [0.18, 0.2, 0.17, 1.0],
             ),
-            // The cube, turned a little so the light catches three faces.
+            // The cube, turned a little so the light catches three faces;
+            // the player script moves it.
             cube(
                 "cube",
                 TransformDesc {
@@ -361,7 +399,7 @@ fn starter_scene() -> SceneFile {
             // Orbits the cube, driven by `orbit_system` in `src/main.rs`;
             // its script blips once per revolution.
             EntityDesc {
-                script: Some(STARTER_SCRIPT.to_string()),
+                script: Some(MOON_SCRIPT.to_string()),
                 audio: Some(AudioDesc {
                     source: STARTER_SOUND.to_string(),
                     spatial: true,
@@ -464,7 +502,10 @@ cargo run
 A lit cube on a ground slab with a small moon orbiting it. The window
 title and size come from `shin.toml`, the scene from
 `scenes/main.scene.ron`, and the orbit from `orbit_system` in
-`src/main.rs`.
+`src/main.rs`. The cube is yours: `scripts/player.rhai` slides it with
+the arrow keys or the left stick and lifts it while Space or the
+gamepad's south button (A / Cross) is held. Those are the `move_x`,
+`move_z`, and `jump` actions bound in `shin.toml`; rebind them there.
 
 ## Drive it with an agent
 
@@ -514,18 +555,19 @@ what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 
 ## Controls
 
-- W/S: forward and back, A/D: strafe, E/Q: up and down
+- Arrow keys or left stick: move the cube; Space or gamepad south: lift it
+- W/S: camera forward and back, A/D: strafe, E/Q: up and down
 - Hold the right mouse button to look around
 - Escape: quit
 
 ## Layout
 
 ```
-shin.toml       project name, window settings, and entry scene
+shin.toml       project name, window settings, entry scene, input actions
 src/main.rs     the game: systems, tools, window and --mcp modes
 scenes/         scene files (.scene.ron)
+scripts/        Rhai scripts (player.rhai drives the cube; moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)
-scripts/        Rhai scripts (the moon's blips once per revolution)
 .mcp.json       runs the game with --mcp for agents
 ```
 "#
@@ -560,8 +602,8 @@ struct OpenArgs {
 struct InfoArgs {}
 
 /// The `project.info` description of the open project: `{ name, dir,
-/// entry_scene, window: { title, width, height } }`. Re-reads `shin.toml`,
-/// so edits made since opening show up.
+/// entry_scene, window: { title, width, height }, input: { actions } }`.
+/// Re-reads `shin.toml`, so edits made since opening show up.
 fn info(engine: &Headless) -> anyhow::Result<serde_json::Value> {
     let root = engine
         .resources
@@ -573,6 +615,7 @@ fn info(engine: &Headless) -> anyhow::Result<serde_json::Value> {
         "dir": root.0,
         "entry_scene": project.entry_scene,
         "window": project.window,
+        "input": project.input,
     }))
 }
 
@@ -592,7 +635,8 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "project.info",
         "Describes the open project: { name, dir, entry_scene, window: { title, width, \
-         height } }, read from its shin.toml. Fails if no project is open.",
+         height }, input: { actions } }, read from its shin.toml. Fails if no project is \
+         open.",
         |engine: &mut Headless, _: InfoArgs| Ok(ToolOutput::Json(info(engine)?)),
     ));
     reg.register(TypedTool::new(
@@ -695,6 +739,7 @@ mod tests {
                 "shin.toml",
                 "src/main.rs",
                 "scenes/main.scene.ron",
+                "scripts/player.rhai",
                 "assets/cube.gltf",
                 "assets/cube.bin",
                 "assets/sounds/blip.wav",
@@ -706,7 +751,7 @@ mod tests {
         );
         assert_eq!(fs::read(dir.join(STARTER_SOUND))?, crate::audio::blip_wav());
         assert!(
-            fs::read_to_string(dir.join(STARTER_SCRIPT))?.contains("play_sound_at(entity"),
+            fs::read_to_string(dir.join(MOON_SCRIPT))?.contains("play_sound_at(entity"),
             "the moon script uses the script API"
         );
         let cargo = fs::read_to_string(dir.join("Cargo.toml"))?;
@@ -717,8 +762,52 @@ mod tests {
         );
         let project = Project::load(&dir)?;
         assert_eq!(project.entry_scene, Some(PathBuf::from(STARTER_SCENE)));
+        assert_eq!(project.input, starter_input());
+        let manifest = fs::read_to_string(dir.join(MANIFEST))?;
+        assert!(manifest.contains("[input.actions]"), "{manifest}");
+        assert!(
+            manifest.contains(r#"jump = ["Space", "Gamepad:South"]"#),
+            "{manifest}"
+        );
         let scene = SceneFile::from_ron(&fs::read_to_string(dir.join(STARTER_SCENE))?)?;
         assert_eq!(scene, starter_scene());
+        let cube = scene
+            .entities
+            .iter()
+            .find(|e| e.name.as_deref() == Some("cube"))
+            .expect("the starter scene has a cube");
+        assert_eq!(cube.script.as_deref(), Some(STARTER_SCRIPT));
+        assert!(dir.join(STARTER_SCRIPT).is_file());
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// The starter's player script compiles against the script API and
+    /// defines `update`.
+    #[test]
+    fn starter_script_compiles() {
+        let mut scripts = crate::script::ScriptEngine::new();
+        let dir = temp_dir("player-script");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(dir.join(STARTER_SCRIPT), PLAYER_RHAI).unwrap();
+        scripts
+            .load(Path::new(STARTER_SCRIPT), &dir)
+            .expect("player.rhai compiles");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_rejects_a_bad_key_name_naming_it() -> anyhow::Result<()> {
+        let dir = temp_dir("bad-key");
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join(MANIFEST),
+            "[project]\nname = \"x\"\n[window]\ntitle = \"x\"\nwidth = 8\nheight = 8\n\
+             [input.actions]\njump = [\"Spce\"]\n",
+        )?;
+        let err = format!("{:#}", Project::load(&dir).unwrap_err());
+        assert!(err.contains("shin.toml"), "names the file: {err}");
+        assert!(err.contains("unknown key `Spce`"), "names the key: {err}");
         fs::remove_dir_all(&dir)?;
         Ok(())
     }

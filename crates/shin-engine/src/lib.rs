@@ -10,7 +10,7 @@
 //! - [`ecs`]    — hecs `World` wrapper, systems schedule, `Time`  (GE-004)
 //! - [`asset`]  — glTF + texture loading into CPU-side structs    (GE-005)
 //! - [`render`] — mesh upload, materials, shaders, instancing     (GE-006, GE-008)
-//! - [`input`]  — keyboard/mouse state, camera controller         (GE-007)
+//! - [`input`]  — keyboard/mouse state, camera controller, actions (GE-007, GE-033)
 //! - [`stats`]  — frame-time statistics                           (GE-009)
 //! - [`tool`]   — engine-native tool registry (what MCP exposes)  (GE-013)
 //! - [`headless`] — window-less engine handle for tools and tests (GE-013)

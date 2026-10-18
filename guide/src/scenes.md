@@ -88,6 +88,33 @@ Each entry of `entities`:
 | `texture`   | string     | no       | Base-colour texture, as a texture asset source; none for untextured. Ignored without `mesh`. |
 | `script`    | string     | no       | A `.rhai` file relative to the project directory, run every fixed step while playing; see [Scripting](scripting.md). |
 | `audio`     | audio      | no       | The entity's sound; see [`audio`](#audio) below and [Audio](audio.md). |
+| `children`  | list of entity | no   | Entities that belong to this one; see [Children](#children). Default empty, and left out when empty. |
+
+### Children
+
+An entity can carry other entities in its `children` list, nested as deep
+as you like: a turret on a tank, a light on a lamp post. A child's
+`transform` is **local to its parent**. It is applied after the parent's,
+so the child moves, turns, and scales with the parent. This scene ships with
+the engine and is rendered by its `golden_hierarchy` test:
+
+```ron
+{{#include ../../crates/shin-engine/assets/scenes/hierarchy.scene.ron}}
+```
+
+The spheres sit at `±1.5` on the parent's own X axis. The parent is turned
+a quarter turn about Y and scaled to 0.8, so in the world they end up in
+front of and behind the cube, 1.2 units away.
+
+Saving writes each entity under its parent: top-level entities in entity id
+order, each `children` list in id order. Loading spawns them depth first
+in file order and links each child to its parent, so saving a freshly
+loaded file reproduces it byte for byte. Files without `children` load
+unchanged; the format version stays 1.
+
+Translation, rotation, and scale compose separately. If a parent has a
+non-uniform scale and its child is rotated, the slant (shear) that a full
+matrix product would give is dropped.
 
 ### `transform`
 
@@ -136,7 +163,8 @@ once and shared by every entity that names it.
 
 Saving captures every entity that has a transform, in entity id order,
 with its transform, mesh source, colour, texture source, name, script,
-and audio source; plus the camera and the light. Nothing else survives a save and load:
+audio source, and children nested inside it; plus the camera and the light. A child
+whose parent has no transform is written at the top level. Nothing else survives a save and load:
 other components, and entities without a transform, are not in the file.
 That is also what [Play and Stop](editor.md#play-pause-stop) in the editor
 restore, because the play snapshot is a scene file in memory.
@@ -161,7 +189,8 @@ as it was. These are errors, each naming what is wrong:
 - an invalid camera (`look_at` equal to `position` or directly above or
   below it, a field of view outside 1 to 179) or a zero light direction,
 - a mesh or texture source that does not parse or cannot be loaded (the
-  error names the entity index and the source).
+  error names the source and the entity index, counting nested children
+  depth first).
 
 A successful load replaces every entity, then applies the camera and the
 light if the file has them.
@@ -171,7 +200,13 @@ light if the file has them.
 | Tool         | What it does |
 |--------------|--------------|
 | `scene.save` | Saves the scene to a `.scene.ron` path, creating missing directories. Returns the path written and the number of entities. |
-| `scene.load` | Replaces every entity with those in a file and applies its camera and light. Undoable. Returns the number of entities spawned. |
+| `scene.load` | Replaces every entity with those in a file and applies its camera and light. Undoable. Returns the number of entities spawned, children included. |
+| `entity.set_parent` | Makes an entity the child of another, or a top-level entity again with `parent: null`. By default it keeps the entity's world position; `keep_world: false` keeps its local transform instead. Undoable. |
+| `entity.despawn` | Removes an entity and, by default, all its descendants. With `recursive: false` its children stay, as top-level entities in the same world position. Undoable. |
+
+`entity.list` reports each entity's `parent` id and its
+`world_translation` alongside the local transform. `entity.spawn` takes an
+optional `parent`.
 
 With a project open, relative paths are resolved against the project
 directory and paths that leave it are rejected. See the

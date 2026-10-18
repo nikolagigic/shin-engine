@@ -8,12 +8,15 @@
 //! Play and Stop (GE-024) use the engine's play mode
 //! ([`shin::headless::PlayState`]); while playing, a [`PlayClock`] steps the
 //! simulation every frame and edits are refused.
+//! The scene's own [`Camera`] resource is left as authored (GE-030): the
+//! editor's [`OrbitCamera`] is swapped in only around the viewport render
+//! while editing, and Play renders from the scene camera as the game would.
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
 //! an offscreen target instead of the surface).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -25,12 +28,13 @@ use shin::command::{self, History};
 use shin::ecs::{Entity, Name};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
-use shin::math::Camera;
-use shin::project::Project;
+use shin::math::{Camera, Transform};
+use shin::project::{Project, ProjectRoot};
 use shin::render::{MeshInstance, begin_mesh_pass};
 use shin::tool::{ToolOutput, ToolRegistry};
 use winit::window::Window;
 
+use crate::assets::{self, AssetBrowser};
 use crate::edit;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
@@ -68,8 +72,16 @@ pub struct EditorCore {
     quit: bool,
     /// The open project's manifest.
     project: Project,
+    /// The open project's directory (canonical), which the Assets panel
+    /// scans and Import copies into.
+    project_dir: PathBuf,
     selection: Selection,
     inspector: Inspector,
+    /// The Assets panel (GE-032).
+    assets: AssetBrowser,
+    /// Whether the Assets tab was docked last frame; docking it again
+    /// (View menu) rescans at once.
+    assets_docked: bool,
     fields: Fields,
     /// The scene file Save writes, relative to the project.
     scene_path: String,
@@ -96,6 +108,7 @@ impl EditorCore {
         // The target is resized to the Viewport panel once it is laid out.
         let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
         let project = scene::open(&mut engine, project_dir)?;
+        let project_dir = engine.resources.expect::<ProjectRoot>().0.clone();
         let clock = PlayClock::new(engine.fixed_dt);
         Ok(Self {
             clock,
@@ -112,8 +125,11 @@ impl EditorCore {
             quit: false,
             scene_path: scene::default_path(&project),
             project,
+            project_dir,
             selection: Selection::default(),
             inspector: Inspector::default(),
+            assets: AssetBrowser::default(),
+            assets_docked: false,
             fields: Fields::default(),
             saved: Vec::new(),
         })
@@ -144,6 +160,13 @@ impl EditorCore {
         let egui_ctx = self.egui.clone();
         let mut actions = Vec::new();
         self.drop_dead_selection();
+        // Opening the Assets panel (View menu) rescans the project at once;
+        // while it is shown it checks for changes on its own.
+        let assets_docked = self.dock.find_tab(&Tab::Assets).is_some();
+        if assets_docked && !self.assets_docked {
+            self.assets.invalidate();
+        }
+        self.assets_docked = assets_docked;
         let mut full = egui_ctx.run_ui(input, |ui| {
             EditorUi {
                 engine: &self.engine,
@@ -153,6 +176,8 @@ impl EditorCore {
                 console: &mut self.console,
                 selection: &mut self.selection,
                 inspector: &mut self.inspector,
+                assets: &mut self.assets,
+                project_dir: &self.project_dir,
                 fields: &mut self.fields,
                 scene_path: &self.scene_path,
                 actions: &mut actions,
@@ -176,9 +201,10 @@ impl EditorCore {
             renderer,
         );
         if self.viewport_texture.is_some() {
-            self.orbit
-                .apply(self.engine.resources.expect_mut::<Camera>());
-            render_scene(&mut self.engine, self.selection.0);
+            // Editing: the viewport shows the orbit camera. Playing: the
+            // scene's own camera, as the game would (GE-030).
+            let view = (!self.engine.play_state().is_playing()).then(|| self.orbit.transform());
+            render_scene(&mut self.engine, self.selection.0, view);
         }
 
         let screen = egui_wgpu::ScreenDescriptor {
@@ -286,8 +312,20 @@ impl EditorCore {
             }
             Action::Spawn(source) => {
                 let name = spawn_name(&source);
-                let entity = edit::spawn(reg, engine, &source, self.orbit.target, name.as_deref())?;
+                // GE-031: with a selection, the new entity is its child.
+                let parent = self.selection.0.filter(|&e| engine.world.contains(e));
+                let entity = edit::spawn(
+                    reg,
+                    engine,
+                    &source,
+                    self.orbit.target,
+                    name.as_deref(),
+                    parent,
+                )?;
                 self.selection.0 = Some(entity);
+            }
+            Action::Reparent { entity, parent } => {
+                edit::set_parent(reg, engine, entity, parent)?;
             }
             Action::Despawn(entity) => {
                 edit::despawn(reg, engine, entity)?;
@@ -330,22 +368,43 @@ impl EditorCore {
                 edit::commit_audio(reg, engine, entity, audio.as_ref())?;
             }
             Action::PreviewSound(source) => edit::preview_sound(reg, engine, &source)?,
+            Action::Edit(Edit::Texture(entity, source)) => {
+                edit::commit_texture(reg, engine, entity, source.as_deref())?;
+            }
             Action::Edit(Edit::Script(entity, path)) => {
                 // A compile error is logged by the engine and shown in the
                 // inspector; the script stays attached.
                 edit::commit_script(reg, engine, entity, &path)?;
             }
-            Action::Open => self.open()?,
+            Action::Open => self.open_scene(scene::default_path(&self.project))?,
+            Action::OpenScene(path) => self.open_scene(path)?,
             Action::Save => self.save_as(self.scene_path.clone())?,
             Action::SaveAs(path) => self.save_as(path)?,
+            Action::Import(path) => {
+                let imported = assets::import(&self.project_dir, Path::new(&path))
+                    .with_context(|| format!("importing {path}"))?;
+                log::info!("imported {path} as {}", imported.display());
+                self.assets.invalidate();
+            }
+            Action::ViewFromSceneCamera => {
+                let camera = engine
+                    .resources
+                    .get::<Camera>()
+                    .context("no Camera resource")?;
+                self.orbit.look_from(&camera.transform);
+            }
+            Action::SetSceneCameraFromView => {
+                let view = self.orbit.transform();
+                edit::commit_camera(reg, engine, view.translation, self.orbit.target)?;
+            }
         }
         Ok(())
     }
 
-    /// File > Open: loads the project's entry scene (not an undoable edit:
-    /// the history starts over) and makes it the scene Save writes.
-    fn open(&mut self) -> anyhow::Result<()> {
-        let path = scene::default_path(&self.project);
+    /// File > Open and the Assets panel's Open: loads the scene file at
+    /// `path` (relative to the project; not an undoable edit: the history
+    /// starts over) and makes it the scene Save writes.
+    fn open_scene(&mut self, path: String) -> anyhow::Result<()> {
         self.registry
             .call(&mut self.engine, "scene.load", json!({ "path": path }))
             .with_context(|| format!("opening {path}"))?;
@@ -478,9 +537,11 @@ fn sync_viewport_texture(
 }
 
 /// Renders `engine`'s scene into its target with `selected` tinted toward
-/// white. The tint is put back right after the render, so the component,
-/// the history, and saved scenes never see it.
-fn render_scene(engine: &mut Headless, selected: Option<Entity>) {
+/// white and, with `view`, from that placement instead of the scene
+/// camera's. The tint and the camera are put back right after the render,
+/// so the component, the `Camera` resource, the history, and saved scenes
+/// never see them.
+fn render_scene(engine: &mut Headless, selected: Option<Entity>, view: Option<Transform>) {
     let tinted = selected.and_then(|entity| {
         let instance = engine
             .world
@@ -490,7 +551,14 @@ fn render_scene(engine: &mut Headless, selected: Option<Entity>) {
         instance.color = highlight(original);
         Some((entity, original))
     });
+    let authored = view.map(|view| {
+        let camera = engine.resources.expect_mut::<Camera>();
+        std::mem::replace(&mut camera.transform, view)
+    });
     engine.render_to_target();
+    if let Some(transform) = authored {
+        engine.resources.expect_mut::<Camera>().transform = transform;
+    }
     if let Some((entity, original)) = tinted {
         edit::preview_color(engine, entity, original);
     }
@@ -686,7 +754,7 @@ pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shin::math::Transform;
+    use shin::math::{Projection, Vec2, Vec3};
     use shin::project::{self, NewProjectOptions};
     use shin::scene::TransformDesc;
 
@@ -1244,6 +1312,538 @@ mod tests {
 
         core.try_run(Action::Edit(Edit::Script(cube, String::new())))?;
         assert!(entities(&mut core)?[1].get("script").is_none(), "cleared");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// An editor on a fresh demo project after one frame, with the GPU,
+    /// a window-sized target, the temp root, and the scene file's path.
+    fn editor(
+        label: &str,
+    ) -> anyhow::Result<(
+        EditorCore,
+        GpuContext,
+        OffscreenTarget,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> {
+        let (root, project_dir) = demo_project(label)?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let scene_file = project_dir.join("scenes/main.scene.ron");
+        Ok((core, gpu, target, root, scene_file))
+    }
+
+    /// The scene camera's placement.
+    fn scene_camera(core: &EditorCore) -> Transform {
+        core.engine.resources.expect::<Camera>().transform
+    }
+
+    /// The camera a scene file holds.
+    fn file_camera(path: &Path) -> anyhow::Result<shin::scene::CameraDesc> {
+        shin::scene::SceneFile::from_ron(&std::fs::read_to_string(path)?)?
+            .camera
+            .context("the scene file has no camera")
+    }
+
+    /// The middle of the Viewport panel after two frames.
+    fn viewport(
+        core: &mut EditorCore,
+        gpu: &GpuContext,
+        target: &OffscreenTarget,
+    ) -> anyhow::Result<image::RgbaImage> {
+        for _ in 0..2 {
+            frame(core, gpu, target, Vec::new());
+        }
+        let image = target.read_pixels(gpu)?;
+        Ok(image::imageops::crop_imm(&image, 400, 135, 800, 450).to_image())
+    }
+
+    /// How many pixels differ between two same-sized images.
+    fn differing(a: &image::RgbaImage, b: &image::RgbaImage) -> usize {
+        a.pixels().zip(b.pixels()).filter(|(a, b)| a != b).count()
+    }
+
+    /// GE-030: frames with the orbit camera never touch the scene camera,
+    /// so Save after orbiting writes the camera that was authored.
+    #[test]
+    fn orbit_and_save_keep_the_scene_camera() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, scene_file) = editor("scene-camera-save")?;
+        let authored = scene_camera(&core);
+        assert_eq!(
+            authored.translation,
+            Vec3::new(0.0, 2.0, 5.0),
+            "the starter scene's camera is the scene camera"
+        );
+        core.try_run(Action::Save)?;
+        let before = std::fs::read_to_string(&scene_file)?;
+
+        core.orbit.orbit(Vec2::new(300.0, -80.0));
+        core.orbit.pan(Vec2::new(40.0, 20.0));
+        core.orbit.zoom(400.0);
+        for _ in 0..3 {
+            frame(&mut core, &gpu, &target, Vec::new());
+        }
+        assert_eq!(scene_camera(&core), authored, "frames leave it alone");
+        assert!(
+            core.orbit
+                .transform()
+                .translation
+                .distance(authored.translation)
+                > 1.0,
+            "the view is somewhere else"
+        );
+        assert!(!core.is_dirty(), "orbiting is not an edit");
+
+        core.try_run(Action::Save)?;
+        let after = std::fs::read_to_string(&scene_file)?;
+        assert_eq!(after, before, "the saved file is identical");
+        assert_eq!(
+            file_camera(&scene_file)?.position,
+            authored.translation.to_array()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-030: "Set scene camera from view" records one `camera.set` that
+    /// moves the scene camera to the orbit camera, keeping the field of
+    /// view; it dirties the scene, Save writes it, and Ctrl+Z puts the
+    /// authored camera back exactly.
+    #[test]
+    fn set_scene_camera_from_view_is_undoable() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, scene_file) = editor("scene-camera-set")?;
+        core.try_run(Action::Save)?;
+        let original_file = std::fs::read_to_string(&scene_file)?;
+        let authored = *core.engine.resources.expect::<Camera>();
+        let Projection::Perspective { fov_y_radians, .. } = authored.projection else {
+            panic!("the starter camera is perspective");
+        };
+
+        core.orbit.orbit(Vec2::new(250.0, 60.0));
+        core.orbit.zoom(-300.0);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let view = core.orbit.transform();
+        core.try_run(Action::SetSceneCameraFromView)?;
+        let camera = *core.engine.resources.expect::<Camera>();
+        assert!(
+            camera.transform.translation.distance(view.translation) < 1e-4,
+            "{camera:?}"
+        );
+        assert!(
+            camera.transform.forward().distance(view.forward()) < 1e-4,
+            "{camera:?}"
+        );
+        assert!(
+            matches!(camera.projection, Projection::Perspective { fov_y_radians: f, .. } if f == fov_y_radians),
+            "the field of view is kept: {:?}",
+            camera.projection
+        );
+        assert!(core.is_dirty() && core.title().contains('*'));
+        let stack = core.undo_stack();
+        assert_eq!(stack.len(), 1, "{stack:?}");
+        assert_eq!(stack[0].0, "camera.set", "{stack:?}");
+
+        core.try_run(Action::Save)?;
+        assert_ne!(std::fs::read_to_string(&scene_file)?, original_file);
+        let saved = file_camera(&scene_file)?;
+        assert!(
+            Vec3::from(saved.position).distance(view.translation) < 1e-4,
+            "{saved:?}"
+        );
+        // A scene file's look_at is the view ray's point nearest the origin,
+        // so check the direction, not the point.
+        let saved_forward = (Vec3::from(saved.look_at) - Vec3::from(saved.position)).normalize();
+        assert!(
+            saved_forward.distance(view.forward()) < 1e-3,
+            "look_at is on the view ray: {saved:?}"
+        );
+
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert_eq!(
+            scene_camera(&core),
+            authored.transform,
+            "Ctrl+Z puts the authored camera back"
+        );
+        assert!(core.is_dirty(), "undone past the save");
+        core.try_run(Action::Save)?;
+        assert_eq!(std::fs::read_to_string(&scene_file)?, original_file);
+        frame(&mut core, &gpu, &target, vec![undo_key(true)]);
+        assert!(
+            scene_camera(&core).translation.distance(view.translation) < 1e-4,
+            "Ctrl+Shift+Z redoes it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-030: the viewport renders from the orbit camera while editing and
+    /// from the scene camera while playing; Stop returns to the orbit view,
+    /// and "View from scene camera" moves the orbit camera to match.
+    #[test]
+    fn play_renders_from_the_scene_camera() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("scene-camera-play")?;
+        core.orbit.orbit(Vec2::new(400.0, -100.0));
+        core.orbit.zoom(500.0);
+        let orbit_view = viewport(&mut core, &gpu, &target)?;
+        let total = orbit_view.pixels().count();
+
+        core.try_run(Action::Play)?;
+        let playing_view = viewport(&mut core, &gpu, &target)?;
+        let changed = differing(&orbit_view, &playing_view);
+        assert!(
+            changed > total / 10,
+            "playing shows the scene camera ({changed} of {total} pixels differ)"
+        );
+
+        core.try_run(Action::Stop)?;
+        let stopped_view = viewport(&mut core, &gpu, &target)?;
+        assert_eq!(
+            differing(&orbit_view, &stopped_view),
+            0,
+            "Stop returns to the orbit view"
+        );
+
+        core.try_run(Action::ViewFromSceneCamera)?;
+        let authored = scene_camera(&core);
+        let view = core.orbit.transform();
+        assert!(view.translation.distance(authored.translation) < 1e-4);
+        assert!(view.forward().distance(authored.forward()) < 1e-4);
+        assert!(!core.is_dirty(), "viewing is not an edit");
+        let from_scene = viewport(&mut core, &gpu, &target)?;
+        let changed = differing(&playing_view, &from_scene);
+        assert!(
+            changed < total / 100,
+            "the orbit camera now shows the scene camera's view ({changed} pixels differ)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-032: the Assets panel's action paths. Spawn and Assign (mesh,
+    /// texture, script) are each one undoable edit; Open loads a scene
+    /// file and makes it the one Save writes; Import copies a file into
+    /// `assets/` and the panel lists it.
+    #[test]
+    fn assets_panel_spawn_assign_open_and_import() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("assets-panel")?;
+        let test_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../shin-engine/assets/test");
+        // A second mesh whose image is the PNG next to it, and a script.
+        std::fs::copy(
+            test_assets.join("textured_cube.gltf"),
+            project_dir.join("assets/crate.gltf"),
+        )?;
+        std::fs::copy(
+            test_assets.join("checker.png"),
+            project_dir.join("assets/checker.png"),
+        )?;
+        std::fs::create_dir_all(project_dir.join("scripts"))?;
+        std::fs::write(
+            project_dir.join("scripts/lift.rhai"),
+            "fn update(entity, dt) { entity.transform.translation.y += dt; }",
+        )?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        // The panel is in the default layout, so one frame scans the project.
+        frame(&mut core, &gpu, &target, Vec::new());
+        let sources = |core: &EditorCore| -> Vec<String> {
+            core.assets
+                .entries()
+                .iter()
+                .map(|e| e.source.to_string())
+                .collect()
+        };
+        assert_eq!(
+            sources(&core),
+            [
+                "assets/checker.png",
+                "assets/crate.gltf",
+                "assets/crate.gltf#image=0",
+                "assets/cube.gltf",
+                "scenes/main.scene.ron",
+                "scripts/lift.rhai",
+                "scripts/moon.rhai",
+                "scripts/player.rhai",
+            ]
+        );
+        let starter = core.engine.world.len();
+
+        // Spawn: the mesh entry's source, at the orbit target, selected.
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Spawn("assets/crate.gltf".to_string()),
+        )?;
+        assert_eq!(core.engine.world.len(), starter + 1);
+        let spawned = core.selection.0.expect("the new entity is selected");
+        assert_eq!(
+            core.engine.world.get::<&Name>(spawned)?.0,
+            "crate",
+            "named after the file"
+        );
+        assert_eq!(
+            core.engine.world.get::<&Transform>(spawned)?.translation,
+            core.orbit.target
+        );
+
+        // Assign to selection: mesh, texture (and its removal), script.
+        let cube = named(&core, "cube");
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Mesh(cube, "assets/crate.gltf".to_string())),
+        )?;
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Texture(
+                cube,
+                Some("assets/crate.gltf#image=0".to_string()),
+            )),
+        )?;
+        let instance = *core.engine.world.get::<&MeshInstance>(cube)?;
+        let state = core.engine.resources.expect::<shin::render::RenderState>();
+        assert_eq!(
+            state
+                .textures
+                .source(instance.texture.expect("textured"))
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("assets/crate.gltf#image=0")
+        );
+        run_undo_redo(&mut core, None, Action::Edit(Edit::Texture(cube, None)))?;
+        assert_eq!(core.engine.world.get::<&MeshInstance>(cube)?.texture, None);
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Script(cube, "scripts/lift.rhai".to_string())),
+        )?;
+        assert_eq!(
+            core.engine
+                .world
+                .get::<&shin::script::Script>(cube)?
+                .path
+                .to_string_lossy(),
+            "scripts/lift.rhai"
+        );
+        // Five actions (spawn and four assigns), each one history entry.
+        assert_eq!(core.engine.resources.expect::<History>().undo_len(), 5);
+
+        // Open: save a copy, then open it from the panel; the history
+        // starts over and Save targets the copy.
+        core.try_run(Action::SaveAs("scenes/copy.scene.ron".to_string()))?;
+        core.assets.invalidate();
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert!(
+            sources(&core).contains(&"scenes/copy.scene.ron".to_string()),
+            "{:?}",
+            sources(&core)
+        );
+        core.try_run(Action::Despawn(cube))?;
+        assert!(core.is_dirty());
+        core.try_run(Action::OpenScene("scenes/copy.scene.ron".to_string()))?;
+        assert_eq!(core.scene_path, "scenes/copy.scene.ron");
+        assert!(!core.is_dirty());
+        assert_eq!(core.engine.resources.expect::<History>().undo_len(), 0);
+        assert!(
+            core.engine
+                .world
+                .query::<(Entity, &Name)>()
+                .iter()
+                .any(|(_, n)| n.0 == "cube"),
+            "the cube is back from the saved copy"
+        );
+        let err = core
+            .try_run(Action::OpenScene("scenes/none.scene.ron".to_string()))
+            .expect_err("a missing scene fails");
+        assert!(err.to_string().contains("scenes/none.scene.ron"), "{err}");
+
+        // Import: an absolute path is copied into assets/ and listed (its
+        // image is the checker.png already there).
+        let gltf = test_assets.join("textured_cube.gltf").canonicalize()?;
+        core.try_run(Action::Import(gltf.to_string_lossy().into_owned()))?;
+        assert!(project_dir.join("assets/textured_cube.gltf").is_file());
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert!(
+            sources(&core).contains(&"assets/textured_cube.gltf#image=0".to_string()),
+            "{:?}",
+            sources(&core)
+        );
+        let err = core
+            .try_run(Action::Import(gltf.to_string_lossy().into_owned()))
+            .expect_err("importing the same name twice fails");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        let err = core
+            .try_run(Action::Import("relative.png".to_string()))
+            .expect_err("a relative path fails");
+        assert!(format!("{err:#}").contains("absolute"), "{err:#}");
+
+        // The imported file's entries can be used like any other.
+        let cube = named(&core, "cube");
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Texture(
+                cube,
+                Some("assets/textured_cube.gltf#image=0".to_string()),
+            )),
+        )?;
+
+        // While playing, the panel's edits are refused but Import is not.
+        core.try_run(Action::Play)?;
+        for action in [
+            Action::Spawn("assets/crate.gltf".to_string()),
+            Action::Edit(Edit::Texture(cube, None)),
+            Action::OpenScene("scenes/copy.scene.ron".to_string()),
+        ] {
+            let err = core.try_run(action.clone()).expect_err("refused");
+            assert!(
+                err.to_string().contains("while playing"),
+                "{action:?}: {err}"
+            );
+        }
+        assert!(!Action::Import(String::new()).is_edit());
+        core.try_run(Action::Stop)?;
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-031's editor criterion through the action path: reparent (what a
+    /// drag onto a row asks for), undo and redo it, save, and the file
+    /// shows the nesting; "+" with a selection adds a child; Unparent
+    /// keeps the world position.
+    #[test]
+    fn tree_reparent_undo_and_save_nests() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("tree")?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        let cube = named(&core, "cube");
+        let moon = named(&core, "moon");
+        let moon_world = shin::ecs::world_transform(&core.engine.world, moon);
+        let before = entities(&mut core)?;
+
+        core.try_run(Action::Reparent {
+            entity: moon,
+            parent: Some(cube),
+        })?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), Some(cube));
+        let world = shin::ecs::world_transform(&core.engine.world, moon);
+        assert!(
+            world.translation.abs_diff_eq(moon_world.translation, 1e-5),
+            "the moon stays put: {world:?}"
+        );
+        // The tree draws without trouble with a branch in it.
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Undo)?;
+        assert_eq!(entities(&mut core)?, before, "reparenting is undone");
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), None);
+        core.try_run(Action::Redo)?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), Some(cube));
+
+        // "+ Sphere" with the moon selected adds a grandchild of the cube
+        // at the orbit target.
+        core.selection.0 = Some(moon);
+        core.try_run(Action::Spawn("builtin://sphere".to_string()))?;
+        let sphere = named(&core, "sphere");
+        assert_eq!(core.selection.0, Some(sphere));
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, sphere), Some(moon));
+        let at = shin::ecs::world_transform(&core.engine.world, sphere).translation;
+        assert!(at.abs_diff_eq(core.orbit.target, 1e-4), "{at}");
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Save)?;
+        let saved = std::fs::read_to_string(project_dir.join("scenes/main.scene.ron"))?;
+        let scene = shin::scene::SceneFile::from_ron(&saved)?;
+        let cube_desc = scene
+            .entities
+            .iter()
+            .find(|e| e.name.as_deref() == Some("cube"))
+            .expect("cube is a root");
+        assert_eq!(cube_desc.children.len(), 1, "{saved}");
+        assert_eq!(cube_desc.children[0].name.as_deref(), Some("moon"));
+        assert_eq!(
+            cube_desc.children[0].children[0].name.as_deref(),
+            Some("sphere")
+        );
+        assert!(
+            !scene
+                .entities
+                .iter()
+                .any(|e| e.name.as_deref() == Some("moon")),
+            "the moon is not also a root: {saved}"
+        );
+
+        // Reopening gives the same tree.
+        core.try_run(Action::Open)?;
+        let moon = named(&core, "moon");
+        assert_eq!(
+            shin::ecs::parent_of(&core.engine.world, moon),
+            Some(named(&core, "cube"))
+        );
+
+        // Unparent (the context menu) keeps the world position.
+        let world_before = shin::ecs::world_transform(&core.engine.world, moon);
+        core.try_run(Action::Reparent {
+            entity: moon,
+            parent: None,
+        })?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, moon), None);
+        let world_after = shin::ecs::world_transform(&core.engine.world, moon);
+        assert!(
+            world_after
+                .translation
+                .abs_diff_eq(world_before.translation, 1e-5)
+        );
+
+        // Deleting a parent deletes its subtree, undoably.
+        let cube = named(&core, "cube");
+        let sphere = named(&core, "sphere");
+        core.try_run(Action::Reparent {
+            entity: sphere,
+            parent: Some(cube),
+        })?;
+        core.try_run(Action::Despawn(cube))?;
+        assert!(!core.engine.world.contains(sphere), "the child goes too");
+        core.try_run(Action::Undo)?;
+        assert_eq!(shin::ecs::parent_of(&core.engine.world, sphere), Some(cube));
+
+        // While playing, reparenting is refused like any edit.
+        core.try_run(Action::Play)?;
+        let err = core
+            .try_run(Action::Reparent {
+                entity: sphere,
+                parent: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("while playing"), "{err}");
+        core.try_run(Action::Stop)?;
+
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
