@@ -91,7 +91,7 @@ world. Report which entities are replicated and how you checked.
 | `net_id` is `null` | No snapshot taken yet, or not playing | `sim.play`, `sim.step` with `{"steps": 3}` |
 | Client sees no player entity | `server.rhai` has no `on_player_join`, or it fails | `script.errors`; read the server's log |
 | Player does not move | Action names in the script differ from `shin.toml` | `input.list`; fix the names |
-| Every player moves the same entity | The script reads one player, not `entity.owner` | Use `player_input(entity.owner, ...)` |
+| Every player moves the same entity | The script reads one fixed player id | Read the owner's input: `player_input(entity.owner, "move_x")` in `player.rhai` |
 | Join fails with a certificate error | The server restarted with a new certificate | Use the new `target/shin-server-cert.der`, or `--insecure` |
 | Join times out after five seconds | Server not running, wrong port, or UDP blocked | Check the server log's port; open UDP in the firewall |
 | Client mesh fails to load | The client's project lacks the asset file | Clients load sources from their own `assets/` |
