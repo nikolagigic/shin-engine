@@ -318,6 +318,7 @@ impl ToolRegistry {
         crate::input::register_tools(&mut registry);
         crate::audio::register_tools(&mut registry);
         crate::physics::register_tools(&mut registry);
+        crate::net::register_tools(&mut registry);
         registry
     }
 

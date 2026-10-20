@@ -23,6 +23,7 @@ use crate::audio::{AudioSource, audio_json};
 use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
+use crate::net::{NetIds, Replicated};
 use crate::physics::{Collider, RigidBody};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::script::Script;
@@ -47,7 +48,9 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          (Euler degrees, XYZ), and scale (all local to the parent), world_translation, \
          parent id if it has one, name, script path, and audio (source, volume, looping, \
          spatial, autoplay) if it has them, mesh, colour, and texture (a handle or null) \
-         if the entity draws one, and its physics `body` and `collider` if it has them.",
+         if the entity draws one, its physics `body` and `collider` if it has them, and \
+         for multiplayer `replicated` (whether snapshots carry it) and `net_id` (its \
+         network id, or null before its first snapshot).",
         entity_list,
     ));
     reg.register(
@@ -242,6 +245,7 @@ fn default_limit() -> usize {
 
 fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutput> {
     let world = &engine.world;
+    let net_ids = engine.resources.get::<NetIds>();
     let mut rows: Vec<(u64, Value)> = world
         .query::<(
             Entity,
@@ -252,12 +256,15 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             Option<&AudioSource>,
             Option<&RigidBody>,
             Option<&Collider>,
+            Option<&Replicated>,
         )>()
         .iter()
         .map(
-            |(entity, transform, instance, name, script, audio, body, collider)| {
+            |(entity, transform, instance, name, script, audio, body, collider, replicated)| {
                 let mut row = transform_json(transform);
                 row["entity"] = json!(entity_id(entity));
+                row["replicated"] = json!(replicated.is_some());
+                row["net_id"] = json!(net_ids.and_then(|ids| ids.id(entity)).map(|id| id.0));
                 row["world_translation"] =
                     json!(world_transform(world, entity).translation.to_array());
                 if let Some(parent) = parent_of(world, entity) {
