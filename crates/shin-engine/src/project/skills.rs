@@ -64,11 +64,12 @@ macro_rules! skill {
 }
 
 /// Every skill, in the order they are listed and written.
-pub const SKILLS: [Skill; 4] = [
+pub const SKILLS: [Skill; 5] = [
     skill!("shin-scene-building"),
     skill!("shin-visual-debugging"),
     skill!("shin-scripting"),
     skill!("shin-project"),
+    skill!("shin-multiplayer"),
 ];
 
 /// The skill called `name`, if there is one.

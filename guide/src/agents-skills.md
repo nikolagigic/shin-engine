@@ -13,6 +13,7 @@ both, from one source, to any MCP client and to Claude Code.
 | `shin-visual-debugging` | Work out why a frame looks wrong: list entities, check meshes, aim the camera, test the light, isolate, fix, re-render. |
 | `shin-scripting` | Write a Rhai script, attach it, play and step the simulation, read script errors, iterate with hot reload, stop. |
 | `shin-project` | Create, open, and run a project, learn its layout, serve it with `--mcp`, and add a `game.*` tool. |
+| `shin-multiplayer` | Check what is replicated, host a server, join it from a second engine, watch the session, and debug a client that shows something different. |
 
 Each skill is a short Markdown file with a goal, when to use it, the
 exact tool sequence with example JSON, a verification step, and
