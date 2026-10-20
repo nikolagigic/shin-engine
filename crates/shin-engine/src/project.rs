@@ -22,7 +22,9 @@
 //! `scenes/main.scene.ron` (a lit cube on a ground slab with a small moon
 //! orbiting it and a stack of five crates that physics drops onto the
 //! ground, GE-034; the project's entry scene), `scripts/player.rhai` (moves
-//! the cube with those actions), `assets/cube.gltf` + `assets/cube.bin`,
+//! a player's cube with that player's actions) and `scripts/server.rhai`
+//! (gives each joining player a cube; GE-044), `assets/cube.gltf` +
+//! `assets/cube.bin`,
 //! `assets/sounds/blip.wav` + `scripts/moon.rhai` (the moon blips once per
 //! revolution; GE-036), `.mcp.json` (runs the game with `--mcp`),
 //! `.gitignore`, `README.md`, and for agents (GE-039) a `CLAUDE.md` and
@@ -265,12 +267,18 @@ const MAIN_RS: &str = include_str!("project/template/main.rs");
 /// The project's `CLAUDE.md`, notes for agents; `{name}` is replaced by the
 /// project name.
 const CLAUDE_MD: &str = include_str!("project/template/CLAUDE.md");
-/// The starter's player script, attached to the cube: moves it with the
-/// `move_x`, `move_z`, and `jump` actions of [`starter_input`].
+/// The starter's player script, which every player's cube runs: moves
+/// the cube with its owner's `move_x`, `move_z`, and `jump` actions of
+/// [`starter_input`].
 const PLAYER_RHAI: &str = include_str!("project/template/player.rhai");
 /// Where [`create`] writes the starter's player script, relative to the
-/// project root; the starter scene's cube refers to it.
+/// project root; the server script gives each player's cube it.
 pub const STARTER_SCRIPT: &str = "scripts/player.rhai";
+/// The starter's server script (GE-044), written to
+/// [`crate::script::SERVER_SCRIPT`]: spawns a replicated cube running
+/// [`STARTER_SCRIPT`] for each player who joins, owned by that player, and
+/// despawns it when they leave.
+const SERVER_RHAI: &str = include_str!("project/template/server.rhai");
 /// The glTF cube the starter scene draws, copied into `assets/`.
 const CUBE_GLTF: &[u8] = include_bytes!("../assets/test/cube.gltf");
 /// The cube's vertex buffer, referenced by [`CUBE_GLTF`] as `cube.bin`.
@@ -314,6 +322,7 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
         ("src/main.rs", MAIN_RS.into()),
         (STARTER_SCENE, starter_scene().to_ron()?.into()),
         (STARTER_SCRIPT, PLAYER_RHAI.into()),
+        (crate::script::SERVER_SCRIPT, SERVER_RHAI.into()),
         ("assets/cube.gltf", CUBE_GLTF.into()),
         ("assets/cube.bin", CUBE_BIN.into()),
         (STARTER_SOUND, BLIP_WAV.into()),
@@ -388,7 +397,8 @@ fn starter_input() -> InputConfig {
 pub const STARTER_CRATES: usize = 5;
 
 /// The starter scene, drawn with the project's `assets/cube.gltf`: a
-/// ground slab, a cube on it driven by [`STARTER_SCRIPT`], a small `moon`
+/// ground slab, a cube on it (the players' cubes, which the server script
+/// spawns, start in front of it), a small `moon`
 /// beside the cube, and a stack of [`STARTER_CRATES`] crates (GE-034).
 /// The template's orbit system moves the moon; it starts where that
 /// system puts it at time zero, `(1.6, 0.5, 0)`. The moon carries the
@@ -403,7 +413,6 @@ fn starter_scene() -> SceneFile {
         transform,
         mesh: Some("assets/cube.gltf".to_string()),
         color: Some(color),
-        script: (name == "cube").then(|| STARTER_SCRIPT.to_string()),
         ..Default::default()
     };
     // The unit cube's collider; entity scale sizes it.
@@ -459,8 +468,7 @@ fn starter_scene() -> SceneFile {
         entities: [
             // Ground: the cube flattened into a slab whose top face is y = 0.
             ground,
-            // The cube, turned a little so the light catches three faces;
-            // the player script moves it.
+            // The cube, turned a little so the light catches three faces.
             cube(
                 "cube",
                 TransformDesc {
@@ -591,10 +599,12 @@ of five crates that falls onto the ground (each crate has a dynamic
 rigid body and a box collider; the ground a fixed one). The window
 title and size come from `shin.toml`, the scene from
 `scenes/main.scene.ron`, and the orbit from `orbit_system` in
-`src/main.rs`. The cube is yours: `scripts/player.rhai` slides it with
-the arrow keys or the left stick and lifts it while Space or the
-gamepad's south button (A / Cross) is held. Those are the `move_x`,
-`move_z`, and `jump` actions bound in `shin.toml`; rebind them there.
+`src/main.rs`. In front of it is your own cube, which
+`scripts/server.rhai` gives every player who joins (playing alone, you
+are player 1): `scripts/player.rhai` slides it with the arrow keys or
+the left stick and lifts it while Space or the gamepad's south button
+(A / Cross) is held. Those are the `move_x`, `move_z`, and `jump`
+actions bound in `shin.toml`; rebind them there.
 
 ## Drive it with an agent
 
@@ -647,16 +657,18 @@ what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 ```sh
 cargo run -- --serve            # a dedicated server: no window
 cargo run -- --host             # play in a window and host
-cargo run -- --join HOST:PORT   # play in a window, joined to a server
+cargo run -- --join HOST:PORT --cert target/shin-server-cert.der
 ```
 
-Both run the game's own systems as the authority and send snapshots of
-the replicated entities to joined players; `--port N` picks the port
-(default 7777), and Ctrl-C stops a dedicated server. `shin serve .` is
-the same as `cargo run -- --serve`. `--join` makes the window a client
-that shows the server's replicated entities. The network transport is
-not built yet, so for now no other process can join, and `--join` says so
-and exits.
+`--serve` and `--host` run the game's own systems as the authority and
+send snapshots of the replicated entities to joined players; `--port N`
+picks the port (default 7777), and Ctrl-C stops a dedicated server.
+`shin serve .` is the same as `cargo run -- --serve`. `--join` makes the
+window a client that shows the server's replicated entities and sends
+your input to the server (`--insecure` instead of `--cert` trusts any
+server, for development only). Every player who joins gets a cube of
+their own from `scripts/server.rhai`, moved by their own keys; a solo
+`cargo run` plays the same way with you as the only player.
 
 ## Controls
 
@@ -671,7 +683,8 @@ and exits.
 shin.toml       project name, window settings, entry scene, input actions
 src/main.rs     the game: systems, tools, window, --mcp, --serve, --host, --join
 scenes/         scene files (.scene.ron)
-scripts/        Rhai scripts (player.rhai drives the cube; moon.rhai blips)
+scripts/        Rhai scripts (server.rhai greets players, player.rhai drives
+                their cubes, moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)
 .mcp.json       runs the game with --mcp for agents
 CLAUDE.md       project notes for agents
@@ -847,6 +860,7 @@ mod tests {
                 "src/main.rs",
                 "scenes/main.scene.ron",
                 "scripts/player.rhai",
+                "scripts/server.rhai",
                 "assets/cube.gltf",
                 "assets/cube.bin",
                 "assets/sounds/blip.wav",
@@ -902,14 +916,16 @@ mod tests {
             .iter()
             .find(|e| e.name.as_deref() == Some("cube"))
             .expect("the starter scene has a cube");
-        assert_eq!(cube.script.as_deref(), Some(STARTER_SCRIPT));
+        assert_eq!(cube.script, None, "players get their own cubes");
         assert!(dir.join(STARTER_SCRIPT).is_file());
+        let server = fs::read_to_string(dir.join(crate::script::SERVER_SCRIPT))?;
+        assert!(server.contains(STARTER_SCRIPT), "{server}");
         fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
     /// The starter's player script compiles against the script API and
-    /// defines `update`.
+    /// defines `update`; the server script compiles too.
     #[test]
     fn starter_script_compiles() {
         let mut scripts = crate::script::ScriptEngine::new();
@@ -919,6 +935,9 @@ mod tests {
         scripts
             .load(Path::new(STARTER_SCRIPT), &dir)
             .expect("player.rhai compiles");
+        if let Err(err) = scripts.eval(SERVER_RHAI) {
+            panic!("server.rhai compiles and defines only functions: {err}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -5,10 +5,11 @@
 //!   `id`'s axis and held state of action `name`, from the server's
 //!   [`PlayerInputs`]. An action the project does not define is a runtime
 //!   error, as with `action_axis`; a player with no input reads as at rest.
-//! - `spawn()`: a new entity, set up by chaining `name(text)`,
-//!   `mesh(source)`, `color(r, g, b)`, `at(vec3)`, `script(path)`,
-//!   `replicated(bool)`, and `owner(id)`. It appears after the step, when
-//!   the engine can upload its mesh ([`apply_commands`]).
+//! - `spawn_entity()` (`spawn` is a reserved word in Rhai): a new entity,
+//!   set up by chaining `name(text)`, `mesh(source)`, `color(r, g, b)`,
+//!   `at(vec3)`, `script(path)`, `replicated(bool)`, and `owner(id)`. It
+//!   appears after the step, when the engine can upload its mesh
+//!   ([`apply_commands`]).
 //! - `despawn_owned(id)`: removes every entity player `id` owns (with its
 //!   children), also after the step.
 //!
@@ -40,8 +41,8 @@ pub(crate) type CommandQueue = Rc<RefCell<Vec<Command>>>;
 /// A change to the world a script asked for.
 #[derive(Debug)]
 pub(crate) enum Command {
-    /// Spawn this entity. Shared with the script's `spawn()` handle, so
-    /// calls chained after `spawn()` still change it.
+    /// Spawn this entity. Shared with the script's `spawn_entity()` handle, so
+    /// calls chained after `spawn_entity()` still change it.
     Spawn(Rc<RefCell<SpawnDesc>>),
     /// Despawn every entity this player owns.
     DespawnOwned(PlayerId),
@@ -80,7 +81,7 @@ impl Default for SpawnDesc {
     }
 }
 
-/// What `spawn()` returns: a handle to the queued [`SpawnDesc`]; every
+/// What `spawn_entity()` returns: a handle to the queued [`SpawnDesc`]; every
 /// setter changes it and returns the handle, so calls chain.
 #[derive(Clone, Debug)]
 pub(crate) struct Spawn(Rc<RefCell<SpawnDesc>>);
@@ -110,7 +111,7 @@ pub(crate) fn register(
     let spawns = Rc::clone(&commands);
     engine
         .register_type_with_name::<Spawn>("Spawn")
-        .register_fn("spawn", move || {
+        .register_fn("spawn_entity", move || {
             let desc = Rc::new(RefCell::new(SpawnDesc::default()));
             spawns.borrow_mut().push(Command::Spawn(Rc::clone(&desc)));
             Spawn(desc)

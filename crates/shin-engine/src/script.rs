@@ -48,7 +48,7 @@
 //!   start after every script has run.
 //! - Multiplayer (GE-044): `player_input(id, name)` and
 //!   `player_input_pressed(id, name)` read player `id`'s actions on the
-//!   server; `spawn()` queues a new entity, set up by chaining `name`,
+//!   server; `spawn_entity()` queues a new entity, set up by chaining `name`,
 //!   `mesh`, `color(r, g, b)`, `at(vec3)`, `script`, `replicated(bool)`,
 //!   and `owner(id)`; `despawn_owned(id)` removes everything player `id`
 //!   owns. Spawns and despawns happen after the step ([`apply_commands`]).
