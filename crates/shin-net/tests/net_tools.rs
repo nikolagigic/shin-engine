@@ -73,7 +73,7 @@ fn host_and_join_over_quic() -> anyhow::Result<()> {
     loop {
         host.step(1);
         let status = call(&reg, &mut host, "net.status", json!({}));
-        if status["bytes_out_per_s"].as_f64().unwrap() > 0.0 {
+        if status["bandwidth"]["out_bytes_per_s"].as_f64().unwrap() > 0.0 {
             break;
         }
         assert!(start.elapsed() < DEADLINE, "no bytes counted: {status}");

@@ -52,13 +52,21 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     ));
     reg.register(TypedTool::new(
         "net.status",
-        "Reports this engine's multiplayer session: `role` is \"none\", \"host\", or \
-         \"client\". In a session also `tick` (the server tick), `players` (the players \
-         connected over the network, each `{ id, rtt_ms }`: on a host every joined client, \
-         on a client itself once welcomed), `bytes_in_per_s` and `bytes_out_per_s` (over the \
-         last simulated second), and `bandwidth` (bytes in plus out per tick, oldest first). \
-         A host adds `port`, `cert_path`, and `local_player`; a client adds `addr`, `state` \
-         (connecting, connected, or disconnected), `reason` when disconnected, and `player`.",
+        "Reports this engine's multiplayer role: \"none\" when it is not networked \
+         (playing solo, as under --mcp, included), \"host\" for a listen server (net.host \
+         or --host), \"server\" for a dedicated one (--serve), \"client\" when joined \
+         (net.join or --join). Networked, also `tick` (the server tick), `players` (the \
+         players connected over the network, each `{ id, rtt_ms }`: on a server every joined \
+         client, on a client itself once welcomed), and `bandwidth`. On a server, \
+         `bandwidth` has `full_bytes_per_s`, `sent_bytes_per_s`, and `compression_ratio`: \
+         snapshot bytes per second to all remote players over the last second, as full \
+         snapshots would cost and as actually sent with deltas, and their ratio (null while \
+         nothing was sent). In a net.host or net.join session it also has \
+         `in_bytes_per_s` and `out_bytes_per_s` (everything the transport carried over the \
+         last simulated second) and `per_tick` (bytes in plus out per tick, oldest first). \
+         A host adds `local_player`, and from net.host `port` and `cert_path`; a client adds \
+         `state` (connecting, connected, or disconnected), `reason` when disconnected, \
+         `player`, and from net.join `addr`.",
         net_status,
     ));
     reg.register(TypedTool::new(
@@ -127,10 +135,8 @@ fn net_status(engine: &mut Headless, _: NoArgs) -> anyhow::Result<ToolOutput> {
 }
 
 fn net_players(engine: &mut Headless, _: NoArgs) -> anyhow::Result<ToolOutput> {
-    let res = &engine.resources;
-    let players: Vec<Value> = match res.get::<NetSession>().map(|s| &s.role) {
-        Some(Role::Host { .. }) => {
-            let server = res.expect::<NetServer>();
+    let players: Vec<Value> = match networked(engine) {
+        Networked::Server(server) => {
             let remote = server.remote_players();
             server
                 .players()
@@ -142,10 +148,11 @@ fn net_players(engine: &mut Headless, _: NoArgs) -> anyhow::Result<ToolOutput> {
                 })
                 .collect()
         }
-        Some(Role::Client { .. }) => client_player(res.expect::<NetClient>())
-            .map(|player| vec![json!({ "id": player.0, "local": true, "rtt_ms": ms(res.expect::<NetClient>().rtt()) })])
-            .unwrap_or_default(),
-        None => Vec::new(),
+        Networked::Client(client) => client_player(client)
+            .map(|id| json!({ "id": id.0, "local": true, "rtt_ms": ms(client.rtt()) }))
+            .into_iter()
+            .collect(),
+        Networked::None => Vec::new(),
     };
     Ok(ToolOutput::Json(json!({ "players": players })))
 }
@@ -178,12 +185,38 @@ fn trusted_cert(
     Ok(Some(der))
 }
 
-/// `"none"`, `"host"`, or `"client"`.
+/// What part this engine plays in a multiplayer game, whoever set it up
+/// (`net.host` or `net.join`, or the game's own `--serve`, `--host`, or
+/// `--join`).
+enum Networked<'a> {
+    /// Not networked: no server or client, or a solo server
+    /// ([`NetServer::solo`]) nobody can join.
+    None,
+    /// A server others can join.
+    Server(&'a NetServer),
+    /// A client of a server.
+    Client(&'a NetClient),
+}
+
+fn networked(engine: &Headless) -> Networked<'_> {
+    let res = &engine.resources;
+    if let Some(server) = res.get::<NetServer>().filter(|s| !s.is_solo()) {
+        Networked::Server(server)
+    } else if let Some(client) = res.get::<NetClient>() {
+        Networked::Client(client)
+    } else {
+        Networked::None
+    }
+}
+
+/// `"none"`; `"host"` for a listen server (one with its own local
+/// player), `"server"` for a dedicated one; or `"client"`.
 fn role(engine: &Headless) -> &'static str {
-    match engine.resources.get::<NetSession>().map(|s| &s.role) {
-        None => "none",
-        Some(Role::Host { .. }) => "host",
-        Some(Role::Client { .. }) => "client",
+    match networked(engine) {
+        Networked::None => "none",
+        Networked::Server(server) if server.local_player().is_some() => "host",
+        Networked::Server(_) => "server",
+        Networked::Client(_) => "client",
     }
 }
 
@@ -200,20 +233,23 @@ fn ms(rtt: Option<Duration>) -> Value {
     rtt.map_or(Value::Null, |rtt| json!(rtt.as_secs_f64() * 1000.0))
 }
 
-/// What `net.status` returns.
-fn status(engine: &Headless) -> Value {
-    let res = &engine.resources;
-    let Some(session) = res.get::<NetSession>() else {
-        return json!({ "role": "none" });
+/// The transport side of `bandwidth`, from what a `net.host` or `net.join`
+/// session recorded: `in_bytes_per_s` and `out_bytes_per_s` over the
+/// remembered ticks, and `per_tick` (bytes in plus out per tick, oldest
+/// first). Empty without such a session.
+fn transport_bandwidth(engine: &Headless) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    let Some(session) = engine.resources.get::<NetSession>() else {
+        return fields;
     };
     let per_tick = session.per_tick();
-    let fixed_dt = res.get::<Time>().map_or(engine.fixed_dt, |t| t.fixed_dt);
-    let seconds = per_tick.len() as f64
-        * if fixed_dt > 0.0 {
-            fixed_dt
-        } else {
-            engine.fixed_dt
-        };
+    let fixed_dt = engine
+        .resources
+        .get::<Time>()
+        .map(|t| t.fixed_dt)
+        .filter(|&dt| dt > 0.0)
+        .unwrap_or(engine.fixed_dt);
+    let seconds = per_tick.len() as f64 * fixed_dt;
     let rate = |bytes: u64| {
         if seconds > 0.0 {
             bytes as f64 / seconds
@@ -224,31 +260,46 @@ fn status(engine: &Headless) -> Value {
     let (bytes_in, bytes_out) = per_tick
         .iter()
         .fold((0, 0), |(i, o), (r, s)| (i + r, o + s));
-    let bandwidth: Vec<u64> = per_tick.iter().map(|(r, s)| r + s).collect();
-    let mut status = json!({
-        "role": role(engine),
-        "bytes_in_per_s": rate(bytes_in),
-        "bytes_out_per_s": rate(bytes_out),
-        "bandwidth": bandwidth,
-    });
-    let fields = match &session.role {
-        Role::Host { port, cert_path } => {
-            let server = res.expect::<NetServer>();
+    fields.insert("in_bytes_per_s".into(), json!(rate(bytes_in)));
+    fields.insert("out_bytes_per_s".into(), json!(rate(bytes_out)));
+    let per_tick: Vec<u64> = per_tick.iter().map(|(r, s)| r + s).collect();
+    fields.insert("per_tick".into(), json!(per_tick));
+    fields
+}
+
+/// What `net.status` returns.
+fn status(engine: &Headless) -> Value {
+    let session = engine.resources.get::<NetSession>().map(|s| &s.role);
+    let mut bandwidth = transport_bandwidth(engine);
+    let mut status = match networked(engine) {
+        Networked::None => return json!({ "role": "none" }),
+        Networked::Server(server) => {
+            let snapshots = server.bandwidth();
+            bandwidth.insert("full_bytes_per_s".into(), json!(snapshots.full_bytes_per_s));
+            bandwidth.insert("sent_bytes_per_s".into(), json!(snapshots.sent_bytes_per_s));
+            bandwidth.insert(
+                "compression_ratio".into(),
+                json!(snapshots.compression_ratio()),
+            );
             let players: Vec<Value> = server
                 .remote_players()
                 .into_iter()
                 .map(|(id, rtt)| json!({ "id": id.0, "rtt_ms": ms(rtt) }))
                 .collect();
-            json!({
-                "port": port,
-                "cert_path": cert_path.as_ref().map(|p| p.display().to_string()),
+            let mut status = json!({
                 "tick": server.tick(),
-                "local_player": server.local_player().map(|p| p.0),
                 "players": players,
-            })
+            });
+            if let Some(local) = server.local_player() {
+                status["local_player"] = json!(local.0);
+            }
+            if let Some(Role::Host { port, cert_path }) = session {
+                status["port"] = json!(port);
+                status["cert_path"] = json!(cert_path.as_ref().map(|p| p.display().to_string()));
+            }
+            status
         }
-        Role::Client { addr } => {
-            let client = res.expect::<NetClient>();
+        Networked::Client(client) => {
             let (state, reason) = session::client_state(client);
             let tick = match client.state() {
                 ClientState::Connected { server_tick, .. } => Some(*server_tick),
@@ -259,19 +310,21 @@ fn status(engine: &Headless) -> Value {
                 .map(|id| json!({ "id": id.0, "rtt_ms": ms(client.rtt()) }))
                 .into_iter()
                 .collect();
-            json!({
-                "addr": addr,
+            let mut status = json!({
                 "state": state,
                 "reason": reason,
                 "tick": tick,
                 "player": player.map(|p| p.0),
                 "players": players,
-            })
+            });
+            if let Some(Role::Client { addr }) = session {
+                status["addr"] = json!(addr);
+            }
+            status
         }
     };
-    if let (Value::Object(status), Value::Object(fields)) = (&mut status, fields) {
-        status.extend(fields);
-    }
+    status["role"] = json!(role(engine));
+    status["bandwidth"] = Value::Object(bandwidth);
     status
 }
 
@@ -281,7 +334,10 @@ mod tests {
 
     use crate::headless::Headless;
     use crate::math::Transform;
-    use crate::net::{LoopbackNetwork, Networking, Replicated};
+    use crate::net::{
+        LoopbackNetwork, LoopbackTransport, NetClient, NetServer, Networking, Replicated,
+        ServerOptions, net_client_system, net_server_system,
+    };
     use crate::tool::{ToolOutput, ToolRegistry};
 
     fn call(reg: &ToolRegistry, engine: &mut Headless, tool: &str, args: Value) -> Value {
@@ -365,6 +421,10 @@ mod tests {
             (json!("client"), json!("connecting"))
         );
         assert!(client.play_state().is_playing());
+        assert!(
+            client.resources.expect::<NetClient>().predicting(),
+            "a joined client predicts, as --join does"
+        );
 
         for _ in 0..6 {
             client.step(1);
@@ -376,12 +436,20 @@ mod tests {
         assert_eq!(status["local_player"], 1);
         assert_eq!(status["players"], json!([{ "id": 2, "rtt_ms": null }]));
         assert_eq!(status["tick"], 6);
+        let bandwidth = &status["bandwidth"];
         assert!(
-            status["bytes_out_per_s"].as_f64().unwrap() > 0.0,
+            bandwidth["out_bytes_per_s"].as_f64().unwrap() > 0.0,
             "{status}"
         );
-        assert!(status["bytes_in_per_s"].as_f64().unwrap() > 0.0, "{status}");
-        assert_eq!(status["bandwidth"].as_array().unwrap().len(), 5);
+        assert!(
+            bandwidth["in_bytes_per_s"].as_f64().unwrap() > 0.0,
+            "{status}"
+        );
+        assert!(
+            bandwidth["sent_bytes_per_s"].as_f64().unwrap() > 0.0,
+            "{status}"
+        );
+        assert_eq!(bandwidth["per_tick"].as_array().unwrap().len(), 5);
 
         let status = call(&reg, &mut client, "net.status", json!({}));
         assert_eq!(status["role"], "client");
@@ -468,6 +536,101 @@ mod tests {
             "the solo server is back"
         );
         assert!(host.play_state().is_playing(), "disconnect keeps playing");
+        Ok(())
+    }
+
+    /// Servers and clients the game set up itself (`--serve`, `--host`,
+    /// `--join`) report their role too; a solo server does not count.
+    #[test]
+    fn games_own_servers_and_clients_report_their_role() -> anyhow::Result<()> {
+        let reg = ToolRegistry::with_engine_tools();
+        let mut engine = Headless::new(8, 8)?;
+        engine.resources.insert(NetServer::solo());
+        assert_eq!(
+            call(&reg, &mut engine, "net.status", json!({})),
+            json!({ "role": "none" })
+        );
+        let (server_end, mut client_ends) = LoopbackTransport::pair(1);
+        engine
+            .resources
+            .insert(NetServer::new(Box::new(server_end), 3));
+        let status = call(&reg, &mut engine, "net.status", json!({}));
+        assert_eq!(status["role"], "server");
+        assert!(status.get("local_player").is_none(), "{status}");
+        assert!(status["bandwidth"].get("per_tick").is_none(), "no session");
+        engine
+            .resources
+            .expect_mut::<NetServer>()
+            .add_local_player();
+        assert_eq!(
+            call(&reg, &mut engine, "net.status", json!({}))["role"],
+            "host"
+        );
+
+        let mut client = Headless::new(8, 8)?;
+        client
+            .resources
+            .insert(NetClient::new(Box::new(client_ends.remove(0)), "ada"));
+        let status = call(&reg, &mut client, "net.status", json!({}));
+        assert_eq!(
+            (status["role"].clone(), status["state"].clone()),
+            (json!("client"), json!("connecting"))
+        );
+        Ok(())
+    }
+
+    /// A server with 100 replicated entities, 5 of which move every tick,
+    /// and one client that acknowledges what it receives: `net.status`
+    /// reports the bytes sent per second, what full snapshots would have
+    /// cost, and a ratio well above 1. With deltas off the ratio is 1.
+    #[test]
+    fn net_status_reports_server_bandwidth() -> anyhow::Result<()> {
+        let reg = ToolRegistry::with_engine_tools();
+        let mut ratios = Vec::new();
+        for full_snapshot_every in [60, 1] {
+            let (server_end, mut client_ends) = LoopbackTransport::pair(1);
+            let mut server = Headless::new(8, 8)?;
+            let entities: Vec<_> = (0..100)
+                .map(|i| {
+                    let at = Transform::from_translation(glam::Vec3::X * i as f32);
+                    server.world.spawn((at, Replicated))
+                })
+                .collect();
+            server.resources.insert(NetServer::with_options(
+                Box::new(server_end),
+                ServerOptions {
+                    snapshot_every: 1,
+                    full_snapshot_every,
+                },
+            ));
+            server.schedule.add_fixed("net_server", net_server_system);
+            // A bare client engine: only its acknowledgements matter here.
+            let mut client = Headless::new(8, 8)?;
+            client
+                .resources
+                .insert(NetClient::new(Box::new(client_ends.remove(0)), "ada"));
+            client.schedule.add_fixed("net_client", net_client_system);
+            server.play()?;
+            client.play()?;
+            for tick in 0..90 {
+                for &entity in entities.iter().step_by(20) {
+                    server.world.get::<&mut Transform>(entity)?.translation.y = tick as f32;
+                }
+                server.step(1);
+                client.step(1);
+            }
+            let status = call(&reg, &mut server, "net.status", json!({}));
+            assert_eq!(status["role"], "server");
+            assert_eq!(status["tick"], 90);
+            assert_eq!(status["players"].as_array().map(Vec::len), Some(1));
+            let bandwidth = &status["bandwidth"];
+            let full = bandwidth["full_bytes_per_s"].as_f64().unwrap();
+            let sent = bandwidth["sent_bytes_per_s"].as_f64().unwrap();
+            assert!(full > 0.0 && sent > 0.0, "{status}");
+            ratios.push(bandwidth["compression_ratio"].as_f64().unwrap());
+        }
+        assert!(ratios[0] > 5.0, "deltas on: {ratios:?}");
+        assert_eq!(ratios[1], 1.0, "deltas off");
         Ok(())
     }
 

@@ -13,13 +13,15 @@ use crate::net::{
     Channel, Event, LoopbackTransport, Message, NetClient, NetServer, Owner, PROTOCOL_VERSION,
     PeerId, RemoteEntity, Transport, net_client_system, net_server_input_system, net_server_system,
 };
+use crate::physics::{Collider, ColliderShape, mover_system};
 use crate::script::script_system;
 
 /// The starter project's scripts, as `shin new` writes them.
 const SERVER_RHAI: &str = include_str!("../../project/template/server.rhai");
 const PLAYER_RHAI: &str = include_str!("../../project/template/player.rhai");
 
-/// The starter's movement speed in `player.rhai`, metres per second.
+/// The starter's movement speed (`mover(3.0, 5.0)` in `server.rhai`),
+/// metres per second.
 const SPEED: f32 = 3.0;
 
 fn value(pressed: bool, just_pressed: bool, axis: f32) -> ActionValue {
@@ -37,6 +39,7 @@ fn frame(tick: u64, actions: &[(&str, ActionValue)]) -> InputFrame {
             .iter()
             .map(|(name, value)| (name.to_string(), *value))
             .collect(),
+        ack: None,
     }
 }
 
@@ -186,7 +189,9 @@ fn project_dir(test: &str, server: &str, player: &str) -> PathBuf {
 
 /// A playing server engine for the project in `dir`, serving on
 /// `transport` with a snapshot every tick, its schedule in the order a
-/// game uses: the input half, the scripts, the snapshot half.
+/// game uses: the input half, the scripts, the movers, the snapshot half.
+/// Its world has the starter's ground slab (top at y = 0) for the
+/// players' cubes to stand on.
 fn server_engine(dir: &Path, server: NetServer) -> anyhow::Result<Headless> {
     let mut res = Resources::new();
     res.insert(Assets::new(dir.to_path_buf()));
@@ -195,8 +200,17 @@ fn server_engine(dir: &Path, server: NetServer) -> anyhow::Result<Headless> {
     let mut schedule = Schedule::new();
     schedule.add_fixed("net_server_input", net_server_input_system);
     schedule.add_fixed("script", script_system);
+    schedule.add_fixed("mover", mover_system);
     schedule.add_fixed("net_server", net_server_system);
     let mut engine = Headless::from_parts(World::new(), res, schedule, (8, 8))?;
+    engine.world.spawn((
+        Transform {
+            translation: Vec3::new(0.0, -0.25, 0.0),
+            scale: Vec3::new(20.0, 0.5, 20.0),
+            ..Default::default()
+        },
+        Collider::new(ColliderShape::Cuboid(Vec3::splat(0.5))),
+    ));
     engine.play()?;
     Ok(engine)
 }
@@ -478,6 +492,35 @@ fn tools_drive_the_solo_player() -> anyhow::Result<()> {
         format!("{err:#}").contains("unknown action `fly`"),
         "{err:#}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// GE-048: `.mover(speed, jump)` gives a spawned entity a [`Mover`], as
+/// the starter's server script does for each player's cube; settings
+/// that make no sense are a script error.
+#[test]
+fn a_spawn_can_be_a_mover() -> anyhow::Result<()> {
+    use serde_json::json;
+
+    use crate::physics::Mover;
+    use crate::tool::ToolRegistry;
+
+    let dir = project_dir("mover", SERVER_RHAI, PLAYER_RHAI);
+    let mut engine = server_engine(&dir, NetServer::solo())?;
+    engine.step(1);
+    let movers: Vec<(PlayerId, Mover)> = engine
+        .world
+        .query::<(&Owner, &Mover)>()
+        .iter()
+        .map(|(owner, mover)| (owner.0, *mover))
+        .collect();
+    assert_eq!(movers, [(P1, Mover::new(SPEED, 5.0))]);
+
+    let reg = ToolRegistry::with_engine_tools();
+    let bad = json!({ "source": "spawn_entity().mover(-3.0, 5.0)" });
+    let err = reg.call(&mut engine, "script.eval", bad).unwrap_err();
+    assert!(format!("{err:#}").contains("mover settings"), "{err:#}");
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

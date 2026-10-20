@@ -109,7 +109,7 @@ pub fn status_text(status: &Value) -> String {
             .map_or(String::new(), |ms| format!(", {ms:.0} ms"))
     };
     match status["role"].as_str() {
-        Some("host") => {
+        Some("host" | "server") => {
             let joined = status["players"].as_array().map_or(0, Vec::len);
             format!(
                 "Hosting on port {} · {joined} joined · tick {}",
@@ -190,17 +190,21 @@ pub fn panel_ui(
             ui.end_row();
         }
     });
-    let rate = |key: &str| view.status[key].as_f64().unwrap_or(0.0);
+    let bandwidth = &view.status["bandwidth"];
+    let rate = |key: &str| bandwidth[key].as_f64().unwrap_or(0.0);
     ui.label(format!(
         "{:.0} B/s in · {:.0} B/s out",
-        rate("bytes_in_per_s"),
-        rate("bytes_out_per_s")
+        rate("in_bytes_per_s"),
+        rate("out_bytes_per_s")
     ));
-    let bandwidth: Vec<f64> = view.status["bandwidth"]
+    if let Some(ratio) = bandwidth["compression_ratio"].as_f64() {
+        ui.label(format!("snapshots {ratio:.1}× smaller with deltas"));
+    }
+    let per_tick: Vec<f64> = bandwidth["per_tick"]
         .as_array()
         .map(|values| values.iter().filter_map(Value::as_f64).collect())
         .unwrap_or_default();
-    sparkline(ui, &bandwidth);
+    sparkline(ui, &per_tick);
 }
 
 /// A line through `values` (bytes per tick, oldest first), scaled to its

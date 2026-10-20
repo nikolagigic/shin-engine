@@ -447,7 +447,7 @@ Takes no arguments.
 
 ## `net.status`
 
-Reports this engine's multiplayer session: `role` is "none", "host", or "client". In a session also `tick` (the server tick), `players` (the players connected over the network, each `{ id, rtt_ms }`: on a host every joined client, on a client itself once welcomed), `bytes_in_per_s` and `bytes_out_per_s` (over the last simulated second), and `bandwidth` (bytes in plus out per tick, oldest first). A host adds `port`, `cert_path`, and `local_player`; a client adds `addr`, `state` (connecting, connected, or disconnected), `reason` when disconnected, and `player`.
+Reports this engine's multiplayer role: "none" when it is not networked (playing solo, as under --mcp, included), "host" for a listen server (net.host or --host), "server" for a dedicated one (--serve), "client" when joined (net.join or --join). Networked, also `tick` (the server tick), `players` (the players connected over the network, each `{ id, rtt_ms }`: on a server every joined client, on a client itself once welcomed), and `bandwidth`. On a server, `bandwidth` has `full_bytes_per_s`, `sent_bytes_per_s`, and `compression_ratio`: snapshot bytes per second to all remote players over the last second, as full snapshots would cost and as actually sent with deltas, and their ratio (null while nothing was sent). In a net.host or net.join session it also has `in_bytes_per_s` and `out_bytes_per_s` (everything the transport carried over the last simulated second) and `per_tick` (bytes in plus out per tick, oldest first). A host adds `local_player`, and from net.host `port` and `cert_path`; a client adds `state` (connecting, connected, or disconnected), `reason` when disconnected, `player`, and from net.join `addr`.
 
 Takes no arguments.
 

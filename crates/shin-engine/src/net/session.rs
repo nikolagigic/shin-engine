@@ -23,7 +23,7 @@ use super::{
 };
 use crate::ecs::{Entity, Resources, World};
 use crate::headless::Headless;
-use crate::project::ProjectRoot;
+use crate::project::{Project, ProjectRoot};
 
 /// The UDP port `net.host` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 7777;
@@ -138,8 +138,8 @@ impl NetSession {
 /// `net.status`. Does nothing without a session.
 fn net_session_system(_: &mut World, res: &mut Resources) {
     let traffic = match (res.get::<NetServer>(), res.get::<NetClient>()) {
-        (Some(server), _) => server.traffic(),
-        (None, Some(client)) => client.traffic(),
+        (Some(server), _) => server.transport_traffic(),
+        (None, Some(client)) => client.transport_traffic(),
         (None, None) => Traffic::default(),
     };
     if let Some(session) = res.get_mut::<NetSession>() {
@@ -230,8 +230,9 @@ pub(crate) fn host(engine: &mut Headless, port: u16, snapshot_every: u32) -> any
 
 /// Joins the server at `addr` as `name`, trusting `cert` (or any server
 /// if `None`): a [`NetClient`] on the [`Networking`] network, with the
-/// client's systems added to the schedule if missing; then starts play
-/// mode. The engine's own [`NetServer`] (a solo one) is set aside, so its
+/// client's systems added to the schedule if missing, predicting the local
+/// player's movers unless the project's `shin.toml` says `[net] predict =
+/// false`; then starts play mode. The engine's own [`NetServer`] (a solo one) is set aside, so its
 /// server script does not run here.
 ///
 /// Fails if a session is running, there is no network, the server cannot
@@ -245,7 +246,15 @@ pub(crate) fn join(
     ensure_no_session(engine)?;
     let transport = network(engine)?.connect(addr, cert)?;
     let previous = engine.resources.remove::<NetServer>();
-    engine.resources.insert(NetClient::new(transport, name));
+    let mut client = NetClient::new(transport, name);
+    // Prediction (GE-048) follows the project's `[net] predict`, on by
+    // default.
+    if let Some(root) = engine.resources.get::<ProjectRoot>()
+        && let Ok(project) = Project::load(&root.0)
+    {
+        client.set_prediction(project.net.predict);
+    }
+    engine.resources.insert(client);
     ensure_fixed(engine, "net_client", net_client_system);
     if !engine.schedule.has_frame("net_interpolate") {
         engine

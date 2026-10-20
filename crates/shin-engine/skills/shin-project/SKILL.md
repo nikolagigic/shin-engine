@@ -35,7 +35,7 @@ shin.toml              project name, window title and size, entry scene
 Cargo.toml             depends on shin-engine, shin-mcp, and shin-net
 src/main.rs            the game: systems, game tools, window, --mcp, --serve, --host, --join
 scenes/main.scene.ron  the entry scene, loaded on start
-scripts/               Rhai scripts: server.rhai (a cube per player), player.rhai (moves it), moon.rhai
+scripts/               Rhai scripts: server.rhai (a walking cube per player), player.rhai (its rules), moon.rhai
 assets/                glTF meshes, textures, and sounds/blip.wav
 .mcp.json              runs the game with --mcp for MCP clients
 CLAUDE.md              project notes for agents

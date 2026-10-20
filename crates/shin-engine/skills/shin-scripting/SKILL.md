@@ -100,17 +100,15 @@ fn on_player_join(id) {
     spawn_entity()                    // appears after the step
         .name(`player ${id}`).mesh("assets/cube.gltf").color(0.2, 0.5, 0.9)
         .at(vec3(1.5 * (id - 1), 0.5, 2.5)).script("scripts/player.rhai")
+        .mover(3.0, 5.0)              // walks with move_x/move_z, jumps with jump
         .replicated(true)             // sent to clients
-        .owner(id);                   // entity.owner in its script
+        .owner(id);                   // whose input; entity.owner in its script
 }
 fn on_player_leave(id) { despawn_owned(id); }
 
-// scripts/player.rhai
+// scripts/player.rhai: server-only rules; player_input(entity.owner, "move_x") is -1..1
 fn update(entity, dt) {
-    let p = entity.transform.translation;
-    p.x += player_input(entity.owner, "move_x") * 3.0 * dt;   // axis, -1..1
-    if player_input_pressed(entity.owner, "jump") { p.y += 4.0 * dt; }
-    entity.transform.translation = p;
+    if entity.transform.translation.y < -10.0 { entity.transform.translation = vec3(0.0, 0.5, 2.5); }
 }
 ```
 
@@ -146,3 +144,5 @@ transform before and after the steps.
   `despawn_owned` take effect after the step; look one step later.
 - **`action_axis` in a player's script** reads the local keyboard, not
   that player's; use `player_input(entity.owner, ...)`.
+- **Player movement**: steer with `.mover(...)`, not the transform; see
+  `shin-multiplayer`.

@@ -30,3 +30,6 @@ log = { workspace = true }
 [dev-dependencies]
 # Already a workspace dependency; the tool tests build JSON arguments.
 serde_json = { workspace = true }
+# For `examples/net_arena.rs`: logging and the window's clear colour.
+env_logger = { workspace = true }
+wgpu = { workspace = true }

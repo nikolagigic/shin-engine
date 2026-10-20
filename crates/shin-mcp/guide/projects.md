@@ -24,7 +24,7 @@ mygame/
   shin.toml               project name, window settings, and entry scene
   src/main.rs             the game: systems, tools, window, --mcp, --serve, --host, --join
   scenes/main.scene.ron   the starter scene (the entry scene)
-  scripts/player.rhai     moves a player's cube with that player's input actions
+  scripts/player.rhai     puts a player's cube back when it falls off the ground
   scripts/server.rhai     gives every player who joins a cube of their own
   assets/cube.gltf        the cube mesh the starter scene draws
   assets/cube.bin         its vertex buffer
@@ -216,11 +216,11 @@ each time the moon completes a revolution; see [Audio](audio.md).
 When play starts you join the game as player 1, even alone, and
 `scripts/server.rhai` gives you a cube of your own in front of the
 centre cube (every other player who joins gets one too; see
-[Multiplayer](multiplayer.md#players-and-input)). It runs
-`scripts/player.rhai`: the arrow keys or the left stick slide it over
-the ground (`move_x`, `move_z`), and holding Space or the gamepad's
-south button lifts it (`jump`). Let go and it settles back. WASD stays
-on the fly camera.
+[Multiplayer](multiplayer.md#players-and-input)). It walks with a
+mover: the arrow keys or the left stick slide it over the ground
+(`move_x`, `move_z`), and Space or the gamepad's south button makes it
+jump (`jump`). Walk off the edge and `scripts/player.rhai` puts it back.
+WASD stays on the fly camera.
 
 ## Files for agents
 
@@ -232,8 +232,8 @@ on the fly camera.
   live, and how to add a game tool, with a link to this guide.
 - **`.claude/skills/<name>/SKILL.md`** for each of the
   [agent skills](agents-skills.md): `shin-scene-building`,
-  `shin-visual-debugging`, `shin-scripting`, and `shin-project`. Claude
-  Code discovers project skills in that folder and uses one when a task
+  `shin-visual-debugging`, `shin-scripting`, `shin-project`, and
+  `shin-multiplayer`. Claude Code discovers project skills in that folder and uses one when a task
   matches its description. Other MCP clients get the same skills as
   prompts from the server.
 

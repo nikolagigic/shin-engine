@@ -18,6 +18,7 @@ mod project {
         Channel, InputFrame, LoopbackTransport, Message, NetServer, Owner, PROTOCOL_VERSION,
         PeerId, PlayerId, Transport, net_server_input_system, net_server_system,
     };
+    use shin::physics::mover_system;
     use shin::project::{self, EngineDep, NewProjectOptions, Project};
     use shin::render::MeshInstance;
     use shin::script::{ScriptEngine, script_system};
@@ -112,6 +113,7 @@ mod project {
         let mut schedule = Schedule::new();
         schedule.add_fixed("net_server_input", net_server_input_system);
         schedule.add_fixed("script", script_system);
+        schedule.add_fixed("mover", mover_system);
         schedule.add_fixed("net_server", net_server_system);
         let mut resources = Resources::new();
         resources.insert(server);
@@ -196,6 +198,7 @@ mod project {
                         axis: 1.0,
                     },
                 )],
+                ack: None,
             };
             guest.send(PeerId(0), &Message::Input(frame), Channel::Unreliable);
             engine.step(1);

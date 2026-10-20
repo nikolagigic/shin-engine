@@ -5,9 +5,9 @@ use glam::Vec3;
 
 use super::*;
 use crate::headless::Headless;
+use crate::net::protocol::NetTransform;
 use crate::net::{EntitySnap, LoopbackTransport, NetServer, PeerId, Replicated, net_server_system};
 use crate::physics::{BodyKind, Collider, ColliderShape, PhysicsWorld, RigidBody};
-use crate::scene::TransformDesc;
 use crate::script::Script;
 
 /// The server end of a loopback, driven by hand.
@@ -43,8 +43,10 @@ impl FakeServer {
     fn snapshot(&mut self, tick: u64, entities: &[(u64, f32)], removed: &[u64]) {
         self.send(Message::Snapshot(Snapshot {
             tick,
+            baseline: None,
             entities: entities.iter().map(|&(id, x)| at(id, x)).collect(),
             removed: removed.iter().copied().map(NetId).collect(),
+            last_input_ticks: Vec::new(),
         }));
     }
 }
@@ -55,11 +57,12 @@ fn at(id: u64, x: f32) -> EntitySnap {
         id: NetId(id),
         parent: None,
         name: Some(format!("e{id}")),
-        transform: TransformDesc::from_transform(&Transform::from_translation(Vec3::X * x)),
+        transform: NetTransform::from_transform(&Transform::from_translation(Vec3::X * x)),
         mesh: Some("builtin://cube".into()),
         color: Some([1.0, 0.5, 0.25, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
@@ -244,6 +247,7 @@ fn late_and_duplicate_snapshots_are_dropped() {
     let mut buffer = SnapshotBuffer::new(0);
     let snap = |tick| Snapshot {
         tick,
+        baseline: None,
         ..Snapshot::default()
     };
     buffer.push(snap(5));
@@ -366,5 +370,79 @@ fn scripts_do_not_run_on_remote_entities() -> anyhow::Result<()> {
     let y = |e| engine.world.get::<&Transform>(e).unwrap().translation.y;
     assert_eq!((y(local), y(remote)), (7.0, 0.0));
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+impl FakeServer {
+    /// Sends the delta from `base` to `now`, both `(tick, entities)`.
+    fn delta(&mut self, base: (u64, &[(u64, f32)]), now: (u64, &[(u64, f32)])) {
+        let full = |(tick, entities): (u64, &[(u64, f32)])| Snapshot {
+            tick,
+            baseline: None,
+            entities: entities.iter().map(|&(id, x)| at(id, x)).collect(),
+            removed: Vec::new(),
+            last_input_ticks: Vec::new(),
+        };
+        let delta = crate::net::diff(&full(base), &full(now));
+        self.send(Message::Snapshot(delta));
+    }
+
+    /// The `ack` of the newest input frame the client sent.
+    fn last_ack(&mut self) -> Option<u64> {
+        self.received()
+            .into_iter()
+            .filter_map(|msg| match msg {
+                Message::Input(frame) => Some(frame.ack),
+                _ => None,
+            })
+            .next_back()
+            .flatten()
+    }
+}
+
+#[test]
+fn deltas_are_patched_onto_their_baseline_and_acknowledged() -> anyhow::Result<()> {
+    let (mut engine, mut server) = joined(0)?;
+    assert_eq!(server.last_ack(), None, "nothing held yet");
+    let base: &[(u64, f32)] = &[(1, 0.0), (2, 5.0), (3, 7.0)];
+    server.snapshot(10, base, &[]);
+    engine.step(1);
+    assert_eq!(server.last_ack(), Some(10));
+
+    // Entity 1 moves, 2 is gone, 4 is new; 3 is not sent at all.
+    server.delta((10, base), (11, &[(1, 1.0), (3, 7.0), (4, 9.0)]));
+    engine.step(1);
+    assert_eq!(server.last_ack(), Some(11));
+    assert_eq!(x_of(&engine, 1), 1.0);
+    assert_eq!(entity(&engine, 2), None);
+    assert_eq!(x_of(&engine, 3), 7.0, "unchanged, kept from the baseline");
+    assert_eq!(x_of(&engine, 4), 9.0);
+    Ok(())
+}
+
+#[test]
+fn a_delta_whose_baseline_is_not_held_is_dropped() -> anyhow::Result<()> {
+    let (mut engine, mut server) = joined(0)?;
+    server.snapshot(10, &[(1, 0.0)], &[]);
+    engine.step(1);
+    // Relative to 7, which this client never received.
+    server.delta((7, &[(1, 0.0)]), (13, &[(1, 3.0)]));
+    engine.step(1);
+    assert_eq!(x_of(&engine, 1), 0.0);
+    assert_eq!(server.last_ack(), Some(10), "still acknowledges 10");
+    Ok(())
+}
+
+#[test]
+fn a_full_snapshot_removes_what_lost_deltas_removed() -> anyhow::Result<()> {
+    let (mut engine, mut server) = joined(0)?;
+    server.snapshot(10, &[(1, 0.0), (2, 0.0)], &[]);
+    engine.step(1);
+    // The delta removing 2 is lost; the next full snapshot lacks 2 and
+    // carries no `removed` of its own.
+    server.snapshot(70, &[(1, 4.0)], &[]);
+    engine.step(1);
+    assert_eq!(x_of(&engine, 1), 4.0);
+    assert_eq!(entity(&engine, 2), None);
     Ok(())
 }

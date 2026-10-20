@@ -9,9 +9,12 @@
 //!    [`Message::Hello`] when connected, tracks the [`ClientState`]
 //!    (inserting [`LocalPlayer`] once welcomed), sends the player's
 //!    [`Actions`] as an [`InputFrame`](super::InputFrame) (GE-044), and
-//!    files incoming snapshots in the [`SnapshotBuffer`]. The snapshot that
-//!    is due (the newest one at least [`SnapshotBuffer::delay`] ticks older
-//!    than the newest received) becomes pending.
+//!    files incoming snapshots in the [`SnapshotBuffer`]. Deltas (GE-049)
+//!    are first patched onto the snapshot they are relative to, so the
+//!    buffer only ever holds full snapshots; each input frame acknowledges
+//!    the newest one. The snapshot that is due (the newest one at least
+//!    [`SnapshotBuffer::delay`] ticks older than the newest received)
+//!    becomes pending.
 //! 2. [`apply_pending`] (after the fixed steps, with the GPU): applies the
 //!    pending snapshot to the world with [`super::apply`], which may upload
 //!    meshes, and marks every entity it lists as a [`RemoteEntity`].
@@ -23,7 +26,11 @@
 //!
 //! Remote entities belong to the server: physics does not simulate them
 //! and scripts do not run on them, so they show exactly what the server
-//! sent.
+//! sent. The exception is the local player's own walking entities, which
+//! the client moves ahead of the server and reconciles with it
+//! ([`super::predict`], GE-048): those are [`Predicted`] as well, step 1
+//! moves them with the input it sends, and steps 2 and 3 leave their
+//! translation alone.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -31,13 +38,15 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 use super::players::{LocalPlayer, input_frame};
+use super::predict::{InputHistory, Predicted, Prediction};
 use super::protocol::{Message, PROTOCOL_VERSION, Snapshot};
-use super::snapshot::apply;
+use super::snapshot::{apply, patch};
 use super::transport::{Channel, Event, PeerId, Traffic, Transport};
-use super::{NetId, NetIds, PlayerId};
+use super::{NetId, NetIds, Owner, PlayerId};
 use crate::ecs::{Entity, Resources, Time, World};
 use crate::input::Actions;
-use crate::math::Transform;
+use crate::math::{Transform, Vec3};
+use crate::physics::Mover;
 use crate::render::RenderState;
 
 /// Component: this entity is the server's, replicated to this client.
@@ -219,7 +228,17 @@ pub struct NetClient {
     server: Option<PeerId>,
     /// Client ticks run so far; stamps each [`InputFrame`](super::InputFrame).
     ticks: u64,
+    /// Full snapshots received (or patched from deltas), oldest first: the
+    /// baselines the server's deltas can be relative to.
+    baselines: VecDeque<Snapshot>,
+    /// Local-player prediction, while it is on.
+    prediction: Option<Prediction>,
 }
+
+/// At most this many baselines are kept; the oldest go first. The server
+/// only makes deltas against the newest one acknowledged, and keeps
+/// baselines for [`super::ServerOptions::full_snapshot_every`] ticks.
+const BASELINES: usize = 128;
 
 impl NetClient {
     /// A client that joins over `transport` as `name`, with the default
@@ -239,7 +258,39 @@ impl NetClient {
             buffer: SnapshotBuffer::new(delay),
             server: None,
             ticks: 0,
+            baselines: VecDeque::new(),
+            prediction: Some(Prediction::default()),
         }
+    }
+
+    /// Turns local-player prediction ([`super::predict`]) on or off; it
+    /// starts on. Off, the local player's own entities are interpolated
+    /// like everyone else's, a round trip behind the input (useful for
+    /// debugging; a project turns it off with `[net] predict = false` in
+    /// `shin.toml`). Turning it on again starts with an empty history.
+    pub fn set_prediction(&mut self, on: bool) {
+        match (on, self.prediction.is_some()) {
+            (true, false) => self.prediction = Some(Prediction::default()),
+            (false, true) => self.prediction = None,
+            _ => {}
+        }
+    }
+
+    /// Whether local-player prediction is on.
+    pub fn predicting(&self) -> bool {
+        self.prediction.is_some()
+    }
+
+    /// The input frames sent but not yet acknowledged by a snapshot, while
+    /// prediction is on.
+    pub fn input_history(&self) -> Option<&InputHistory> {
+        self.prediction.as_ref().map(Prediction::history)
+    }
+
+    /// How many times a snapshot corrected the prediction (`0` while it is
+    /// off).
+    pub fn corrections(&self) -> u64 {
+        self.prediction.as_ref().map_or(0, Prediction::corrections)
     }
 
     /// Where the session is.
@@ -259,7 +310,7 @@ impl NetClient {
     }
 
     /// Bytes the client's transport has sent and received so far.
-    pub fn traffic(&self) -> Traffic {
+    pub fn transport_traffic(&self) -> Traffic {
         self.transport.traffic()
     }
 
@@ -273,6 +324,62 @@ impl NetClient {
             self.transport.send(server, &bye, Channel::Reliable);
         }
         self.state = ClientState::Disconnected(reason.to_string());
+    }
+
+    /// The newest full snapshot held: the tick each input frame
+    /// acknowledges to the server.
+    fn ack(&self) -> Option<u64> {
+        self.baselines.back().map(|snap| snap.tick)
+    }
+
+    /// The full snapshot `snap` stands for, kept as a baseline; `None` if
+    /// it cannot be had.
+    ///
+    /// A delta is patched onto the baseline it names, and baselines older
+    /// than that one are dropped (the server never goes back to them); a
+    /// delta whose baseline is gone (it arrived late) is dropped. A full
+    /// snapshot also lists as removed every entity the newest older
+    /// baseline had that it lacks, so a removal carried only by lost
+    /// deltas still happens.
+    fn receive(&mut self, mut snap: Snapshot) -> Option<Snapshot> {
+        match snap.baseline {
+            Some(baseline) => {
+                let Some(at) = self.baselines.iter().position(|s| s.tick == baseline) else {
+                    log::debug!(
+                        "net: dropping snapshot {}: baseline {baseline} is gone",
+                        snap.tick
+                    );
+                    return None;
+                };
+                snap = match patch(&self.baselines[at], &snap) {
+                    Ok(full) => full,
+                    Err(err) => {
+                        log::warn!("net: dropping snapshot {}: {err:#}", snap.tick);
+                        return None;
+                    }
+                };
+                self.baselines.drain(..at);
+            }
+            None => {
+                if let Some(older) = self.baselines.iter().rev().find(|s| s.tick < snap.tick) {
+                    let gone =
+                        older.entities.iter().map(|e| e.id).filter(|&id| {
+                            snap.entities.binary_search_by_key(&id, |e| e.id).is_err()
+                        });
+                    snap.removed.extend(gone);
+                    snap.removed.sort();
+                    snap.removed.dedup();
+                }
+            }
+        }
+        match self.baselines.binary_search_by_key(&snap.tick, |s| s.tick) {
+            Ok(_) => return None,
+            Err(at) => self.baselines.insert(at, snap.clone()),
+        }
+        while self.baselines.len() > BASELINES {
+            self.baselines.pop_front();
+        }
+        Some(snap)
     }
 
     /// Handles everything the transport received since the last tick.
@@ -297,9 +404,20 @@ impl NetClient {
                     };
                 }
                 Event::Message(_, Message::Snapshot(snap)) => match &mut self.state {
-                    ClientState::Connected { server_tick, .. } => {
+                    ClientState::Connected {
+                        server_tick,
+                        player,
+                    } => {
                         *server_tick = (*server_tick).max(snap.tick);
-                        self.buffer.push(snap);
+                        let player = *player;
+                        // Prediction reconciles against the full picture:
+                        // a delta leaves out a player that did not change.
+                        if let Some(full) = self.receive(snap) {
+                            if let Some(prediction) = &mut self.prediction {
+                                prediction.observe(&full, player);
+                            }
+                            self.buffer.push(full);
+                        }
                     }
                     _ => log::debug!("net: ignoring snapshot {} while not joined", snap.tick),
                 },
@@ -330,22 +448,39 @@ impl NetClient {
 /// [`ClientState::Disconnected`] on a goodbye or a dropped connection).
 /// Once welcomed, it keeps a [`LocalPlayer`] resource naming this client's
 /// player and sends the [`Actions`] resource (no actions without one) to
-/// the server as an unreliable [`Message::Input`] every tick. Then, unless
-/// disconnected, it advances the [`SnapshotBuffer`], which may make a
-/// snapshot pending for [`apply_pending`].
-pub fn net_client_system(_: &mut World, res: &mut Resources) {
+/// the server as an unreliable [`Message::Input`] every tick, which also
+/// acknowledges the newest full snapshot held. While
+/// prediction is on, it then reconciles the [`Predicted`] entities with
+/// the newest snapshot and moves them with the same frame
+/// ([`super::predict`]). Then, unless disconnected, it advances the
+/// [`SnapshotBuffer`], which may make a snapshot pending for
+/// [`apply_pending`].
+pub fn net_client_system(world: &mut World, res: &mut Resources) {
     let Some(client) = res.get::<NetClient>() else {
         return;
     };
-    let frame = input_frame(client.ticks, res.get::<Actions>());
+    let dt = res
+        .get::<Time>()
+        .map_or(1.0 / 60.0, |time| time.fixed_dt as f32);
+    let mut frame = input_frame(client.ticks, res.get::<Actions>());
     let client = res.expect_mut::<NetClient>();
     client.handle_events();
     client.ticks += 1;
+    frame.ack = client.ack();
     if let (ClientState::Connected { player, .. }, Some(server)) = (&client.state, client.server) {
         let player = *player;
         client
             .transport
-            .send(server, &Message::Input(frame), Channel::Unreliable);
+            .send(server, &Message::Input(frame.clone()), Channel::Unreliable);
+        if let Some(mut prediction) = client.prediction.take() {
+            let ids = res
+                .get_mut::<NetIds>()
+                .map(std::mem::take)
+                .unwrap_or_default();
+            prediction.tick(world, &ids, &frame, dt);
+            res.insert(ids);
+            res.expect_mut::<NetClient>().prediction = Some(prediction);
+        }
         if res.get::<LocalPlayer>() != Some(&LocalPlayer(player)) {
             res.insert(LocalPlayer(player));
         }
@@ -358,7 +493,11 @@ pub fn net_client_system(_: &mut World, res: &mut Resources) {
 
 /// Applies the [`NetClient`]'s pending snapshot, if any, to `world` with
 /// [`super::apply`], and marks every entity it lists as a
-/// [`RemoteEntity`]. Call it after the fixed steps of each frame (or
+/// [`RemoteEntity`]. While prediction is on, every listed entity that the
+/// [`LocalPlayer`] owns and that has a [`Mover`] is also [`Predicted`]
+/// (and stops being so otherwise), and a [`Predicted`] entity keeps the
+/// translation and [`Mover`] the client predicted: the snapshot shown is
+/// older than the prediction. Call it after the fixed steps of each frame (or
 /// [`crate::headless::Headless::step`]), with the GPU the world renders
 /// on.
 ///
@@ -382,8 +521,15 @@ pub fn apply_pending(
     else {
         return Ok(());
     };
+    let predicting = res.get::<NetClient>().is_some_and(NetClient::predicting);
+    let held: Vec<(Entity, Vec3, Mover)> = world
+        .query::<(Entity, &Predicted, &Transform, &Mover)>()
+        .iter()
+        .map(|(entity, _, transform, mover)| (entity, transform.translation, *mover))
+        .collect();
     apply(world, res, device, queue, &snap)
         .with_context(|| format!("failed to apply the snapshot of server tick {}", snap.tick))?;
+    let local = res.get::<LocalPlayer>().map(|local| local.0);
     let ids = res.expect::<NetIds>();
     let listed: Vec<Entity> = snap
         .entities
@@ -393,6 +539,23 @@ pub fn apply_pending(
     for entity in listed {
         if world.get::<&RemoteEntity>(entity).is_err() {
             world.insert_one(entity, RemoteEntity)?;
+        }
+        let own = local.is_some()
+            && world.get::<&Owner>(entity).ok().map(|owner| owner.0) == local
+            && world.get::<&Mover>(entity).is_ok();
+        let predicted = world.get::<&Predicted>(entity).is_ok();
+        if predicting && own && !predicted {
+            world.insert_one(entity, Predicted)?;
+        } else if predicted && !(predicting && own) {
+            world.remove_one::<Predicted>(entity)?;
+        }
+    }
+    for (entity, at, mover) in held {
+        if let Ok((transform, current, _)) =
+            world.query_one_mut::<(&mut Transform, &mut Mover, &Predicted)>(entity)
+        {
+            transform.translation = at;
+            *current = mover;
         }
     }
     Ok(())
@@ -407,8 +570,8 @@ pub fn apply_pending(
 /// late or lost, entities wait at the newest pose rather than jumping or
 /// guessing. With no next snapshot they stay at the applied pose.
 /// Translation and scale are interpolated linearly, rotation spherically.
-/// Entities missing from either snapshot are left alone. Does nothing
-/// without a [`NetClient`].
+/// Entities missing from either snapshot, and [`Predicted`] ones, are
+/// left alone. Does nothing without a [`NetClient`].
 pub fn net_interpolate_system(world: &mut World, res: &mut Resources) {
     let alpha = res.get::<Time>().map_or(0.0, |time| time.alpha);
     let (Some(client), Some(ids)) = (res.get::<NetClient>(), res.get::<NetIds>()) else {
@@ -431,7 +594,10 @@ pub fn net_interpolate_system(world: &mut World, res: &mut Resources) {
             a.transform.to_transform(),
             to.entities[at].transform.to_transform(),
         );
-        if let Ok((transform, _)) = world.query_one_mut::<(&mut Transform, &RemoteEntity)>(entity) {
+        if let Ok((transform, _, predicted)) =
+            world.query_one_mut::<(&mut Transform, &RemoteEntity, Option<&Predicted>)>(entity)
+            && predicted.is_none()
+        {
             *transform = lerp(&a, &b, t);
         }
     }

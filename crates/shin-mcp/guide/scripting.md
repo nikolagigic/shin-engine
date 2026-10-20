@@ -202,21 +202,29 @@ step. (It is `spawn_entity` because `spawn` is a reserved word in Rhai.)
 who has left, reads as released. An action the project does not define is
 an error, as with `action_axis`.
 
-The starter project's `scripts/server.rhai` gives each player a cube:
+`.mover(speed, jump_impulse)` on a spawn makes the entity walk with its
+owner's `move_x`, `move_z`, and `jump` actions; unlike movement a script
+makes, the owner's client predicts it, so it responds at once over a
+network (see [Prediction](multiplayer.md#prediction)).
+
+The starter project's `scripts/server.rhai` gives each player a walking
+cube:
 
 ```rhai
 {{#include ../../crates/shin-engine/src/project/template/server.rhai}}
 ```
 
-and each cube runs `scripts/player.rhai`, moved by its owner's input:
+and each cube runs `scripts/player.rhai` on the server, which puts it
+back when it falls off the ground:
 
 ```rhai
 {{#include ../../crates/shin-engine/src/project/template/player.rhai}}
 ```
 
 To try it without a keyboard, play the scene and use `input.set`: solo,
-you are player 1, so `script.eval {"source": "player_input(1, \"move_x\")"}`
-shows what the cube's script sees.
+you are player 1, so `input.set {"action": "move_x", "axis": 1.0}`
+walks your cube, and `script.eval {"source": "player_input(1, \"move_x\")"}`
+shows what a script sees.
 
 ### Limits
 

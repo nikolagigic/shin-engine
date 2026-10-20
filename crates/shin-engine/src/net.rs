@@ -8,10 +8,11 @@
 //!   live only for the session, and are never reused; scene files do not
 //!   store them.
 //! - [`protocol`]: the [`Message`]s peers exchange and their binary codec,
-//!   [`encode`] and [`decode`] (postcard), checked by [`PROTOCOL_VERSION`].
+//!   [`encode`] and [`decode`] (postcard), checked by [`PROTOCOL_VERSION`];
+//!   transforms travel as [`NetTransform`]s, rotations packed in 7 bytes.
 //! - [`snapshot`]: [`capture`] turns the replicated entities into a
 //!   [`Snapshot`]; [`apply`] spawns, updates, and despawns entities from
-//!   one.
+//!   one; [`diff`] and [`patch`] make and undo deltas (GE-049).
 //! - [`server`]: the authority (GE-041): [`NetServer`],
 //!   [`net_server_input_system`] and [`net_server_system`] (the two
 //!   halves of a tick), and [`run_server`] for a dedicated server.
@@ -22,6 +23,10 @@
 //! - [`players`]: players and their input (GE-044): [`InputFrame`]s from
 //!   clients become the server's [`PlayerInputs`]; a client knows itself
 //!   as [`LocalPlayer`].
+//! - [`predict`]: local-player prediction and reconciliation (GE-048):
+//!   the local player's own [`Mover`](crate::physics::Mover)s are
+//!   [`Predicted`], moved at once with its input, and corrected by the
+//!   server's snapshots ([`Snapshot::last_input_ticks`]).
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
 //!   [`LoopbackTransport`], an in-process implementation for tests, with
 //!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
@@ -34,6 +39,7 @@
 
 pub mod client;
 pub mod players;
+pub mod predict;
 pub mod protocol;
 pub mod server;
 pub mod session;
@@ -53,14 +59,17 @@ pub use client::{
     net_interpolate_system,
 };
 pub use players::{LocalPlayer, PlayerInputs};
+pub use predict::{InputHistory, Predicted};
 pub use protocol::{
-    EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
+    EntitySnap, InputFrame, Message, NetTransform, PROTOCOL_VERSION, Snapshot, decode, encode,
+    reject_version,
 };
 pub use server::{
-    NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
+    Bandwidth, NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
 };
 pub use session::{CERT_FILE, DEFAULT_PORT, Listening, Network, Networking};
-pub use snapshot::{apply, capture};
+
+pub use snapshot::{apply, capture, diff, patch};
 pub use tools::register_tools;
 pub use transport::{
     Channel, Event, LoopbackNetwork, LoopbackOptions, LoopbackTransport, PeerId, Traffic, Transport,

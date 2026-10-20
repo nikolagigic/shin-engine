@@ -1,17 +1,20 @@
 //! Turning the world into a [`Snapshot`] ([`capture`], on the server) and
-//! a snapshot back into entities ([`apply`], on a client).
+//! a snapshot back into entities ([`apply`], on a client); and deltas
+//! (GE-049): [`diff`] makes one against an earlier snapshot, [`patch`]
+//! turns it back into the full snapshot.
 //!
 //! What is replicated per entity: its [`NetId`], parent link, [`Name`],
 //! [`Transform`], mesh, colour, and texture (by [`AssetSource`] string),
-//! and [`Owner`]. Scripts, sounds, and physics are not: they run on the
-//! server, and clients see their effect through the transforms.
+//! [`Owner`], and [`Mover`] (so a client can predict its own player,
+//! GE-048). Scripts, sounds, and physics are not: they run on the server,
+//! and clients see their effect through the transforms.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use super::protocol::{EntitySnap, Snapshot};
+use super::protocol::{EntitySnap, NetTransform, Snapshot};
 use super::{NetId, NetIds, Owner, Replicated};
 use crate::asset::{AssetSource, Assets};
 use crate::ecs::{
@@ -19,8 +22,8 @@ use crate::ecs::{
     world_transform,
 };
 use crate::math::Transform;
+use crate::physics::Mover;
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
-use crate::scene::TransformDesc;
 
 /// Captures every entity with [`Replicated`] and a [`Transform`] at `tick`,
 /// in [`NetId`] order.
@@ -89,20 +92,94 @@ fn capture_with(
                 id,
                 parent: net_parent,
                 name: world.get::<&Name>(entity).ok().map(|n| n.0.clone()),
-                transform: TransformDesc::from_transform(&transform),
+                transform: NetTransform::from_transform(&transform),
                 mesh,
                 color,
                 texture,
                 owner: world.get::<&Owner>(entity).ok().map(|o| o.0),
+                mover: world.get::<&Mover>(entity).ok().map(|m| *m),
             }
         })
         .collect();
     entities.sort_by_key(|snap| snap.id);
     Snapshot {
         tick,
+        baseline: None,
         entities,
         removed,
+        last_input_ticks: Vec::new(),
     }
+}
+
+/// The delta that turns full snapshot `base` into full snapshot `now`:
+/// tick `now.tick`, baseline `base.tick`, the entities of `now` that are
+/// not in `base` or whose [`EntitySnap`] differs (any field, the
+/// [`crate::physics::Mover`] state included), in `removed` the entities
+/// of `base` that `now` lacks, and `now`'s `last_input_ticks` whole.
+/// [`patch`] undoes it.
+///
+/// An entity that moved, turned, or changed anything else is sent whole;
+/// one that did not is not sent at all.
+pub fn diff(base: &Snapshot, now: &Snapshot) -> Snapshot {
+    let entities = now
+        .entities
+        .iter()
+        .filter(|snap| find(base, snap.id) != Some(*snap))
+        .cloned()
+        .collect();
+    let removed = base
+        .entities
+        .iter()
+        .filter(|snap| find(now, snap.id).is_none())
+        .map(|snap| snap.id)
+        .collect();
+    Snapshot {
+        tick: now.tick,
+        baseline: Some(base.tick),
+        entities,
+        removed,
+        last_input_ticks: now.last_input_ticks.clone(),
+    }
+}
+
+/// The full snapshot `delta` describes, given the full snapshot `base` it
+/// is relative to: `base`'s entities without `delta.removed`, with
+/// `delta.entities` added or replacing their namesakes, in [`NetId`]
+/// order. Keeps `delta`'s tick, `removed`, and `last_input_ticks`.
+///
+/// Fails if `delta` is not a delta against `base` (its baseline is not
+/// `base.tick`).
+pub fn patch(base: &Snapshot, delta: &Snapshot) -> anyhow::Result<Snapshot> {
+    anyhow::ensure!(
+        delta.baseline == Some(base.tick),
+        "snapshot {} is relative to {:?}, not to snapshot {}",
+        delta.tick,
+        delta.baseline,
+        base.tick
+    );
+    let mut entities: Vec<EntitySnap> = base
+        .entities
+        .iter()
+        .filter(|snap| !delta.removed.contains(&snap.id) && find(delta, snap.id).is_none())
+        .cloned()
+        .chain(delta.entities.iter().cloned())
+        .collect();
+    entities.sort_by_key(|snap| snap.id);
+    Ok(Snapshot {
+        tick: delta.tick,
+        baseline: None,
+        entities,
+        removed: delta.removed.clone(),
+        last_input_ticks: delta.last_input_ticks.clone(),
+    })
+}
+
+/// The entity `id` in `snap`, whose entities are in [`NetId`] order.
+fn find(snap: &Snapshot, id: NetId) -> Option<&EntitySnap> {
+    snap.entities
+        .binary_search_by_key(&id, |e| e.id)
+        .ok()
+        .map(|at| &snap.entities[at])
 }
 
 /// The mesh source, colour, and texture source `instance` draws with. A
@@ -232,6 +309,7 @@ fn apply_with(
         set(world, entity, Some(desc.transform.to_transform()))?;
         set(world, entity, desc.name.clone().map(Name))?;
         set(world, entity, desc.owner.map(Owner))?;
+        set(world, entity, desc.mover)?;
         let instance = draw.map(|(mesh, color, texture)| MeshInstance {
             mesh,
             color,
