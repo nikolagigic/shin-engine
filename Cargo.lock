@@ -3846,6 +3846,7 @@ dependencies = [
  "log",
  "quinn",
  "rcgen",
+ "serde_json",
  "shin-engine",
  "tokio",
 ]

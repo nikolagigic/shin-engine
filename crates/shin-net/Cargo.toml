@@ -26,3 +26,7 @@ rcgen = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 anyhow = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# Already a workspace dependency; the tool tests build JSON arguments.
+serde_json = { workspace = true }

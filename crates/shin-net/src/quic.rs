@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use shin::net::{Channel, Event, Message, PeerId, Transport, decode, encode};
+use shin::net::{Channel, Event, Message, PeerId, Traffic, Transport, decode, encode};
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc as async_mpsc;
 use tokio::task::JoinHandle;
@@ -98,6 +98,9 @@ pub struct QuicTransport {
     unannounced: Vec<PeerId>,
     /// The server's certificate (DER); `None` on a client.
     cert: Option<Vec<u8>>,
+    /// UDP bytes of connections already closed, so [`Transport::traffic`]
+    /// never goes down.
+    retired: Traffic,
     /// Runs the connection tasks. `None` only while dropping.
     runtime: Option<Runtime>,
 }
@@ -135,6 +138,7 @@ impl QuicTransport {
             peers: BTreeMap::new(),
             unannounced: Vec::new(),
             cert: Some(cert_der),
+            retired: Traffic::default(),
             runtime: Some(runtime),
         })
     }
@@ -196,6 +200,7 @@ impl QuicTransport {
             peers,
             unannounced: vec![server],
             cert: None,
+            retired: Traffic::default(),
             runtime: Some(runtime),
         })
     }
@@ -259,7 +264,11 @@ impl Transport for QuicTransport {
                 }
                 Incoming::Message(peer, msg) => events.push(Event::Message(peer, msg)),
                 Incoming::Disconnected(peer) => {
-                    self.peers.remove(&peer);
+                    if let Some(link) = self.peers.remove(&peer) {
+                        let gone = udp_traffic(&link.conn);
+                        self.retired.sent += gone.sent;
+                        self.retired.received += gone.received;
+                    }
                     events.push(Event::Disconnected(peer));
                 }
             }
@@ -269,6 +278,31 @@ impl Transport for QuicTransport {
 
     fn peers(&self) -> Vec<PeerId> {
         self.peers.keys().copied().collect()
+    }
+
+    /// UDP bytes, QUIC framing and acknowledgements included.
+    fn traffic(&self) -> Traffic {
+        self.peers
+            .values()
+            .map(|link| udp_traffic(&link.conn))
+            .fold(self.retired, |total, conn| Traffic {
+                sent: total.sent + conn.sent,
+                received: total.received + conn.received,
+            })
+    }
+
+    /// QUIC's smoothed estimate for the connection.
+    fn rtt(&self, peer: PeerId) -> Option<Duration> {
+        self.peers.get(&peer).map(|link| link.conn.rtt())
+    }
+}
+
+/// The UDP bytes `conn` has sent and received.
+fn udp_traffic(conn: &Connection) -> Traffic {
+    let stats = conn.stats();
+    Traffic {
+        sent: stats.udp_tx.bytes,
+        received: stats.udp_rx.bytes,
     }
 }
 
