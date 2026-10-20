@@ -19,7 +19,8 @@
 //!   [`net_interpolate_system`]; replicated entities on a client are
 //!   [`RemoteEntity`]s.
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
-//!   [`LoopbackTransport`], an in-process implementation for tests.
+//!   [`LoopbackTransport`], an in-process implementation for tests, with
+//!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
 //!
 //! Tools: [`register_tools`] adds `net.status`.
 
@@ -47,7 +48,7 @@ pub use protocol::{
 pub use server::{NetServer, ServerOptions, net_server_system, run_server};
 pub use snapshot::{apply, capture};
 pub use tools::register_tools;
-pub use transport::{Channel, Event, LoopbackTransport, PeerId, Transport};
+pub use transport::{Channel, Event, LoopbackOptions, LoopbackTransport, PeerId, Transport};
 
 /// An entity's identity on the network: the same on the server and every
 /// client, and never reused within a session.

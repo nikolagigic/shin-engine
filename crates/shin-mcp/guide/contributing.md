@@ -53,6 +53,32 @@ intended one, accept it with:
 UPDATE_GOLDEN=1 cargo test -p shin-engine
 ```
 
+### Multiplayer tests
+
+Multiplayer is tested like everything else, in one process with no
+network: `crates/shin-engine/tests/net_loopback.rs` runs a server engine
+and a client engine side by side over a `LoopbackTransport` and compares
+their `entity.list` output and their rendered frames, which must match
+pixel for pixel. `LoopbackTransport::pair_with` takes `LoopbackOptions`
+that simulate a bad network, deterministic from a seed: a fixed latency
+and random jitter in ticks, and a probability of losing each unreliable
+message (snapshots). Reliable messages are delayed but never lost or
+reordered.
+
+```rust
+use shin::net::{LoopbackOptions, LoopbackTransport};
+
+// 100 ms each way at 60 Hz, up to 2 ticks of jitter, 10 % of snapshots lost.
+let net = LoopbackOptions { latency_ticks: 6, jitter_ticks: 2, drop_unreliable: 0.1, seed: 1 };
+let (server_end, client_ends) = LoopbackTransport::pair_with(1, net);
+```
+
+Step both engines one tick at a time (`step(1)` on each) rather than by
+the wall clock. The snapshot size benchmark is
+`cargo bench -p shin-engine --bench net_snapshot`.
+
+### Build directory
+
 Do not share a `CARGO_TARGET_DIR` between checkouts or worktrees: Cargo
 judges freshness by file timestamps, and a shared target directory can
 hand one checkout a stale library.
