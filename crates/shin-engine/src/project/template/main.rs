@@ -22,8 +22,10 @@
 //! forward and back, A/D strafe, E/Q up and down fly the camera; hold the
 //! right mouse button to look around; Escape quits.
 
+use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::Deserialize;
 use shin::app::{self, AppConfig, EcsGame};
 use shin::asset::Assets;
@@ -33,13 +35,14 @@ use shin::gpu::GpuContext;
 use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
-use shin::net::{LoopbackTransport, NetServer, ServerOptions, net_server_system};
+use shin::net::{NetServer, ServerOptions, Transport, net_server_system};
 use shin::physics::physics_system;
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
 use shin::scene;
 use shin::script::script_system;
 use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
+use shin_net::{QuicTransport, ServerTrust};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -47,6 +50,10 @@ const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 /// The UDP port `--serve` and `--host` listen on unless `--port` says
 /// otherwise.
 const DEFAULT_PORT: u16 = 7777;
+
+/// Where a server saves its certificate, relative to the project root
+/// (`target/` is ignored by git, and the file changes every start).
+const CERT_FILE: &str = "target/shin-server-cert.der";
 
 /// Linear clear colour: a dusky sky blue.
 const SKY: wgpu::Color = wgpu::Color {
@@ -159,18 +166,57 @@ fn serve_mcp(project: Project) -> anyhow::Result<()> {
     })
 }
 
-/// The network transport a server listens on.
+/// The network transport a server listens on: QUIC on UDP `port`, on
+/// every network interface.
 ///
-/// No network transport is built into the engine yet, so this is an
-/// in-process loopback with no clients: the server runs and simulates,
-/// but nobody can connect from another process. The real transport
-/// replaces this function's body.
-fn server_transport(port: u16) -> Box<LoopbackTransport> {
-    log::warn!(
-        "no network transport is built yet: serving on an in-process loopback, \
-         so port {port} is not opened and no remote client can join"
+/// The server makes a fresh self-signed certificate each time it starts
+/// and saves it to [`CERT_FILE`], so a client on this machine (or one you
+/// copy the file to) can trust exactly this server with `--cert`.
+fn server_transport(port: u16) -> anyhow::Result<Box<QuicTransport>> {
+    let transport = QuicTransport::listen((Ipv4Addr::UNSPECIFIED, port).into())?;
+    let cert = Path::new(ROOT).join(CERT_FILE);
+    if let Some(dir) = cert.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let der = transport.cert_der().expect("a server has a certificate");
+    std::fs::write(&cert, der)?;
+    log::info!(
+        "clients join with `cargo run -- --join <this machine>:{port} --cert {}` \
+         (or `--insecure` instead of `--cert`, for development only)",
+        cert.display()
     );
-    Box::new(LoopbackTransport::pair(0).0)
+    Ok(Box::new(transport))
+}
+
+/// The network transport a client joins `addr` (`host:port`, e.g.
+/// `127.0.0.1:7777`) over: QUIC, trusting the server's certificate as
+/// `trust` says. Fails if the server does not answer.
+// `--join` (the net client) is its caller.
+#[allow(dead_code)]
+fn client_transport(addr: &str, trust: &ServerTrust) -> anyhow::Result<Box<dyn Transport + Send>> {
+    let resolved = addr
+        .to_socket_addrs()
+        .with_context(|| format!("`{addr}` is not a host:port address"))?
+        .next()
+        .with_context(|| format!("`{addr}` resolves to no address"))?;
+    Ok(Box::new(QuicTransport::connect(resolved, trust)?))
+}
+
+/// Which server certificate a client trusts, from the flags after
+/// `--join <addr>`: `--insecure` (any, for development) or `--cert <path>`
+/// (the [`CERT_FILE`] the server saved).
+#[allow(dead_code)]
+fn server_trust(flags: &[String]) -> anyhow::Result<ServerTrust> {
+    match flags {
+        [flag] if flag == "--insecure" => Ok(ServerTrust::Insecure),
+        [flag, path] if flag == "--cert" => {
+            let der = std::fs::read(path).with_context(|| format!("reading certificate {path}"))?;
+            Ok(ServerTrust::Cert(der))
+        }
+        _ => anyhow::bail!(
+            "--join needs `--insecure` or `--cert <path>` (the server prints the path)"
+        ),
+    }
 }
 
 /// Runs a dedicated server: the game's schedule on a headless engine with
@@ -185,7 +231,7 @@ fn serve(project: Project, port: u16) -> anyhow::Result<()> {
         "serving `{}` on port {port}; press Ctrl-C to stop",
         project.name
     );
-    shin::net::run_server(&mut engine, server_transport(port), ServerOptions::default())
+    shin::net::run_server(&mut engine, server_transport(port)?, ServerOptions::default())
 }
 
 /// First-frame setup in the window: the renderer for the window's colour
@@ -229,7 +275,7 @@ fn run_window(project: Project, host: Option<u16>) -> anyhow::Result<()> {
     let mut game = EcsGame::new(World::new(), schedule);
     if let Some(port) = host {
         let opts = ServerOptions::default();
-        let mut server = NetServer::new(server_transport(port), opts.snapshot_every);
+        let mut server = NetServer::new(server_transport(port)?, opts.snapshot_every);
         server.add_local_player();
         game.resources.insert(server);
         log::info!("hosting `{}` on port {port}", project.name);

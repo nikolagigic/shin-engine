@@ -497,29 +497,36 @@ fn starter_scene() -> SceneFile {
     }
 }
 
-/// The project's `Cargo.toml`. It depends on the engine and on `shin-mcp`
-/// (for `--mcp`), both from the same place: crates.io at the same version,
-/// the git repository, or for [`EngineDep::Path`] the engine directory
-/// and its sibling `shin-mcp` (`crates/shin-engine` and `crates/shin-mcp`
-/// of a checkout). It also
+/// The project's `Cargo.toml`. It depends on the engine, on `shin-mcp`
+/// (for `--mcp`), and on `shin-net` (the network transport), all from the
+/// same place: crates.io at the same version, the git repository, or for
+/// [`EngineDep::Path`] the engine directory and its siblings `shin-mcp`
+/// and `shin-net` (`crates/shin-engine`, `crates/shin-mcp`, and
+/// `crates/shin-net` of a checkout). It also
 /// depends on `wgpu` (for `wgpu::Color`), `anyhow`, `env_logger`, `log`,
 /// and `serde` + `schemars` (for tool arguments), at the versions the
 /// engine itself pins.
 fn cargo_toml(name: &str, engine: &EngineDep) -> anyhow::Result<String> {
-    let (engine, mcp) = match engine {
-        EngineDep::CratesIo { version } => (toml_string(version), toml_string(version)),
+    let (engine, mcp, net) = match engine {
+        EngineDep::CratesIo { version } => {
+            let dep = toml_string(version);
+            (dep.clone(), dep.clone(), dep)
+        }
         EngineDep::Git { url } => {
             let dep = format!("{{ git = {} }}", toml_string(url));
-            (dep.clone(), dep)
+            (dep.clone(), dep.clone(), dep)
         }
         EngineDep::Path(path) => {
             let engine = std::path::absolute(path)
                 .with_context(|| format!("resolving engine path {}", path.display()))?;
-            let mcp = engine
+            let crates = engine
                 .parent()
-                .with_context(|| format!("engine path {} has no parent", engine.display()))?
-                .join("shin-mcp");
-            (path_dep(&engine)?, path_dep(&mcp)?)
+                .with_context(|| format!("engine path {} has no parent", engine.display()))?;
+            (
+                path_dep(&engine)?,
+                path_dep(&crates.join("shin-mcp"))?,
+                path_dep(&crates.join("shin-net"))?,
+            )
         }
     };
     Ok(format!(
@@ -532,6 +539,7 @@ publish = false
 [dependencies]
 shin-engine = {engine}
 shin-mcp = {mcp}
+shin-net = {net}
 wgpu = "30.0"
 anyhow = "1.0"
 env_logger = "0.11"
@@ -1141,18 +1149,20 @@ mod tests {
             .expect("path is a string");
         assert!(Path::new(path).is_absolute(), "{path}");
         assert!(path.ends_with("rel/eng\"ine"), "{path}");
-        // `shin-mcp` is the engine directory's sibling.
-        let mcp = parsed["dependencies"]["shin-mcp"]["path"]
-            .as_str()
-            .expect("shin-mcp path is a string");
-        assert_eq!(Path::new(mcp), Path::new(path).with_file_name("shin-mcp"));
+        // `shin-mcp` and `shin-net` are the engine directory's siblings.
+        for dep in ["shin-mcp", "shin-net"] {
+            let sibling = parsed["dependencies"][dep]["path"]
+                .as_str()
+                .expect("the path is a string");
+            assert_eq!(Path::new(sibling), Path::new(path).with_file_name(dep));
+        }
         Ok(())
     }
 
     #[test]
     fn default_engine_dep_is_this_version_from_crates_io() -> anyhow::Result<()> {
         let parsed: toml::Table = cargo_toml("x", &EngineDep::default())?.parse()?;
-        for dep in ["shin-engine", "shin-mcp"] {
+        for dep in ["shin-engine", "shin-mcp", "shin-net"] {
             assert_eq!(
                 parsed["dependencies"][dep].as_str(),
                 Some(ENGINE_VERSION),
@@ -1166,7 +1176,7 @@ mod tests {
     fn git_engine_dep_also_supplies_shin_mcp() -> anyhow::Result<()> {
         let url = ENGINE_GIT_URL.to_string();
         let parsed: toml::Table = cargo_toml("x", &EngineDep::Git { url })?.parse()?;
-        for dep in ["shin-engine", "shin-mcp"] {
+        for dep in ["shin-engine", "shin-mcp", "shin-net"] {
             assert_eq!(
                 parsed["dependencies"][dep]["git"].as_str(),
                 Some(ENGINE_GIT_URL),
