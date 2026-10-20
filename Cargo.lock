@@ -3766,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "shin-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3777,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "shin-editor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "shin-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3826,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "shin-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3841,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "shin-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "env_logger",

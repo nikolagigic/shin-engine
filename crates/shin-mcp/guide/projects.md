@@ -137,12 +137,12 @@ The generated `Cargo.toml` depends on `shin-engine` (the engine),
 from the same place:
 
 - By default, crates.io, at the version of the `shin` that created the
-  project (Cargo reads `"0.1.0"` as "0.1.0 or any later 0.1.x"):
+  project (Cargo reads `"0.2.0"` as "0.2.0 or any later 0.2.x"):
 
   ```toml
-  shin-engine = "0.1.0"
-  shin-mcp = "0.1.0"
-  shin-net = "0.1.0"
+  shin-engine = "0.2.0"
+  shin-mcp = "0.2.0"
+  shin-net = "0.2.0"
   ```
 
 - With `--engine-path <checkout>/crates/shin-engine`, a local checkout.
