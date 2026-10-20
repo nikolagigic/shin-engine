@@ -99,6 +99,7 @@ changes the entity, as does `entity.transform.translation.y = 1.0`.
 |--------|---------|
 | `.id` | The entity's id, the same number the tools use; read-only. |
 | `.name` | Its name, or an empty string; read-only. |
+| `.owner` | The id of the [player](#players) who owns it, or `0` if nobody does; read-only. |
 | `.transform` | Its `Transform`, **local to its parent** (world space for an entity without one); readable and writable. |
 | `.world_transform` | Its `Transform` in world space, after its parents', as it was at the start of the step. Read-only: it is a copy, and changing it changes nothing. |
 
@@ -117,6 +118,10 @@ entity really is, read `entity.world_transform`.
 | `action_axis(name)` | The value of `name` from -1 to 1. A button action reads 1 while held. |
 | `play_sound(path)` | Plays an `.ogg` or `.wav` file (relative to the project) once, everywhere, at full volume. See [Audio](audio.md). |
 | `play_sound_at(entity, path)` | Plays the file once at `entity`: it fades with the distance from the camera and follows the entity. |
+| `player_input(id, name)` | Player `id`'s value of action `name`, -1 to 1. See [Players](#players). |
+| `player_input_pressed(id, name)` | Whether player `id` holds action `name`. |
+| `spawn_entity()` | Queues a new entity; see [Players](#players). |
+| `despawn_owned(id)` | Queues the removal of every entity player `id` owns, with its children. |
 | `print(x)` | Writes `script: x` to the engine log at info level (the editor's Log panel). |
 | `debug(x)` | Writes to the log at debug level. |
 
@@ -128,11 +133,18 @@ name and never by key, so players can rebind without touching the
 script. Naming an action the project does not define is a runtime error
 that lists the actions that exist.
 
-This is the starter project's `scripts/player.rhai`:
-
 ```rhai
-{{#include ../../crates/shin-engine/src/project/template/player.rhai}}
+fn update(entity, dt) {
+    let p = entity.transform.translation;
+    p.x += action_axis("move_x") * 3.0 * dt;
+    if action_just_pressed("jump") { p.y += 1.0; }
+    entity.transform.translation = p;
+}
 ```
+
+These read the actions of whoever sits at this engine. In a game where
+several people play, read each player's own input with
+[`player_input`](#players) instead; the starter project does.
 
 To try a script without a keyboard, play the scene and drive the actions
 with the `input.set` tool. `script.eval` reads the same values, so
@@ -147,8 +159,69 @@ after every script has run for that step. A sound that cannot be loaded
 The starter project's `scripts/moon.rhai` blips once per revolution; see
 [Audio](audio.md#the-starter-project).
 
-Scripts cannot spawn entities, reach other entities, or call other
-scripts. The `script.eval` tool evaluates a Rhai expression with the same
+### Players
+
+Every game is a server, even played alone (see
+[Multiplayer](multiplayer.md#players-and-input)): each person playing is
+a **player** with an id, counting up from 1, and the server knows every
+player's input actions.
+
+The **server script**, `scripts/server.rhai` in the project, is attached
+to no entity and needs no `update`. The engine calls two functions in it,
+both optional, before the entity scripts of a step:
+
+| Hook | When |
+|------|------|
+| `on_player_join(id)` | Once for every player who joins (solo: you, as player 1, when play starts). |
+| `on_player_leave(id)` | Once for every player who leaves. |
+
+It runs only where the game is the server: solo, `--host`, and
+`--serve`; never on a client that joined. It hot-reloads like any
+script. Stopping play forgets who joined, so the next play calls
+`on_player_join` again.
+
+`spawn_entity()` queues a new entity; chain these to set it up (each is
+optional):
+
+| Method | Meaning |
+|--------|---------|
+| `.name(text)` | Its name. |
+| `.mesh(source)` | The mesh it draws, by [asset source](scenes.md#asset-sources), e.g. `"assets/cube.gltf"` or `"builtin://cube"`. |
+| `.color(r, g, b)` | Linear colour of the mesh; white by default. |
+| `.at(vec3)` | Where it starts, in world space; the origin by default. |
+| `.script(path)` | The script it runs, from the next step. |
+| `.replicated(true)` | Sent to every client (see [Multiplayer](multiplayer.md#replicated-entities)). |
+| `.owner(id)` | The player who owns it: its script reads `entity.owner`. |
+
+The entity appears after the step, once the engine has loaded its mesh;
+`despawn_owned(id)` likewise removes player `id`'s entities after the
+step. (It is `spawn_entity` because `spawn` is a reserved word in Rhai.)
+
+`player_input(id, name)` and `player_input_pressed(id, name)` read player
+`id`'s actions as the server last heard them; a player with no input, or
+who has left, reads as released. An action the project does not define is
+an error, as with `action_axis`.
+
+The starter project's `scripts/server.rhai` gives each player a cube:
+
+```rhai
+{{#include ../../crates/shin-engine/src/project/template/server.rhai}}
+```
+
+and each cube runs `scripts/player.rhai`, moved by its owner's input:
+
+```rhai
+{{#include ../../crates/shin-engine/src/project/template/player.rhai}}
+```
+
+To try it without a keyboard, play the scene and use `input.set`: solo,
+you are player 1, so `script.eval {"source": "player_input(1, \"move_x\")"}`
+shows what the cube's script sees.
+
+### Limits
+
+Scripts cannot reach other entities or call other scripts. The
+`script.eval` tool evaluates a Rhai expression with the same
 API and returns the result as JSON (a `Vec3` as `[x, y, z]`, a `Quat` as
 `[x, y, z, w]`, a transform as an object), which is a quick way to try
 things.

@@ -13,11 +13,15 @@
 //!   [`Snapshot`]; [`apply`] spawns, updates, and despawns entities from
 //!   one.
 //! - [`server`]: the authority (GE-041): [`NetServer`],
-//!   [`net_server_system`], and [`run_server`] for a dedicated server.
+//!   [`net_server_input_system`] and [`net_server_system`] (the two
+//!   halves of a tick), and [`run_server`] for a dedicated server.
 //! - [`client`]: joining one (GE-042): [`NetClient`],
 //!   [`net_client_system`], [`apply_pending`], and
 //!   [`net_interpolate_system`]; replicated entities on a client are
 //!   [`RemoteEntity`]s.
+//! - [`players`]: players and their input (GE-044): [`InputFrame`]s from
+//!   clients become the server's [`PlayerInputs`]; a client knows itself
+//!   as [`LocalPlayer`].
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
 //!   [`LoopbackTransport`], an in-process implementation for tests, with
 //!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
@@ -25,6 +29,7 @@
 //! Tools: [`register_tools`] adds `net.status`.
 
 pub mod client;
+pub mod players;
 pub mod protocol;
 pub mod server;
 pub mod snapshot;
@@ -42,10 +47,13 @@ pub use client::{
     ClientState, NetClient, RemoteEntity, SnapshotBuffer, apply_pending, net_client_system,
     net_interpolate_system,
 };
+pub use players::{LocalPlayer, PlayerInputs};
 pub use protocol::{
     EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
 };
-pub use server::{NetServer, ServerOptions, net_server_system, run_server};
+pub use server::{
+    NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
+};
 pub use snapshot::{apply, capture};
 pub use tools::register_tools;
 pub use transport::{Channel, Event, LoopbackOptions, LoopbackTransport, PeerId, Transport};

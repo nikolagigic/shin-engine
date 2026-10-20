@@ -356,9 +356,14 @@ mod tests {
                     "script",
                     "scripts/player.rhai".to_string()
                 ),
+                (
+                    "scripts/server.rhai".to_string(),
+                    "script",
+                    "scripts/server.rhai".to_string()
+                ),
             ],
             "the starter cube (one primitive, no images), the moon's blip, the \
-             entry scene, and the starter moon and player scripts; cube.bin, src/, \
+             entry scene, and the starter moon, player, and server scripts; cube.bin, src/, \
              and target/ do not show"
         );
         assert_eq!(
@@ -462,6 +467,11 @@ mod tests {
                     "scripts/player.rhai".to_string()
                 ),
                 (
+                    "scripts/server.rhai".to_string(),
+                    "script",
+                    "scripts/server.rhai".to_string()
+                ),
+                (
                     "scripts/spin.rhai".to_string(),
                     "script",
                     "scripts/spin.rhai".to_string()
@@ -486,8 +496,8 @@ mod tests {
         let entries = scan(&dir)?;
         assert_eq!(
             rows(&entries).len(),
-            5,
-            "the broken file is skipped (cube, blip, scene, and the two scripts \
+            6,
+            "the broken file is skipped (cube, blip, scene, and the three scripts \
              remain): {entries:?}"
         );
 

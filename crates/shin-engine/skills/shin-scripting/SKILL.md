@@ -14,6 +14,8 @@ simulation, and leave the scene in edit mode with the script attached.
 
 - An entity should change over time (orbit, spin, bob, pulse) and you do
   not want to touch the game's Rust code.
+- Players should get or control something: a per-player entity, what
+  happens when someone joins or leaves (see "Players" below).
 - A script already exists and misbehaves or fails to compile.
 
 ## The script contract
@@ -33,11 +35,13 @@ fn update(entity, dt) {
 - The entity's `.transform` has `.translation` and `.scale` (`vec3(x, y, z)`,
   with `.x` `.y` `.z`) and `.rotation` (a quaternion; build one with
   `quat_euler(x, y, z)` in **radians**). Changes are written back.
-- The entity's `.id` and `.name` are read-only. `dt` is the fixed step in
-  seconds; `time()` is simulated seconds since play started.
+- The entity's `.id`, `.name`, and `.owner` (the owning player's id, `0`
+  if none) are read-only. `dt` is the fixed step in seconds; `time()` is
+  simulated seconds since play started.
 - Only `update` and functions it calls run. Functions cannot see outer
   `let`s, so put settings inside `update` or in helpers (`fn speed() { 1.5 }`).
-- Scripts cannot spawn entities or reach other entities.
+- Scripts cannot reach other entities. They can queue new ones with
+  `spawn_entity()` (see "Players"); `spawn` is a reserved word in Rhai.
 - Rhai's standard library (`sin`, `cos`, `sqrt`, `PI()`) is available;
   `print(x)` writes to the engine log.
 
@@ -45,8 +49,9 @@ fn update(entity, dt) {
 
 1. **Find the entity.** `entity.list` returns ids, names, and any script
    already attached. Note the id of the entity to script. In the starter
-   project the cube already runs `scripts/player.rhai` and the moon
-   `scripts/moon.rhai`; attaching another script replaces the old one.
+   project the moon runs `scripts/moon.rhai`, and once playing each
+   player's cube (spawned by `scripts/server.rhai`) runs
+   `scripts/player.rhai`; attaching another script replaces the old one.
 
 2. **Try expressions first (optional).** `script.eval` with
    `{"source": "quat_euler(0.0, PI() / 2.0, 0.0) * vec3(1.0, 0.0, 0.0)"}`
@@ -82,6 +87,38 @@ fn update(entity, dt) {
    `sim.play`. The script stays attached. Call `scene.save` (for example
    to the entry scene from `project.info`) to keep the attachment.
 
+## Players
+
+Every game is a server, even solo (you are player 1; under `--mcp` too).
+`scripts/server.rhai` (no entity, no `update`) may define
+`on_player_join(id)` and `on_player_leave(id)`, each called once per
+join or leave, before the entity scripts; never on a joined client.
+
+```rhai
+// scripts/server.rhai
+fn on_player_join(id) {
+    spawn_entity()                    // appears after the step
+        .name(`player ${id}`).mesh("assets/cube.gltf").color(0.2, 0.5, 0.9)
+        .at(vec3(1.5 * (id - 1), 0.5, 2.5)).script("scripts/player.rhai")
+        .replicated(true)             // sent to clients
+        .owner(id);                   // entity.owner in its script
+}
+fn on_player_leave(id) { despawn_owned(id); }
+
+// scripts/player.rhai
+fn update(entity, dt) {
+    let p = entity.transform.translation;
+    p.x += player_input(entity.owner, "move_x") * 3.0 * dt;   // axis, -1..1
+    if player_input_pressed(entity.owner, "jump") { p.y += 4.0 * dt; }
+    entity.transform.translation = p;
+}
+```
+
+To test solo: `sim.play`, `sim.step` with `{"steps": 1}` (the join
+spawns the cube), `input.set` with `{"action": "move_x", "axis": 1.0}`,
+`sim.step`, compare `entity.list`. `sim.stop` removes spawned entities
+and forgets who joined.
+
 ## Verification
 
 Done when, between `sim.play` and `sim.stop`, `entity.list` shows the
@@ -105,3 +142,7 @@ transform before and after the steps.
 - **Endless loops** are stopped after one million operations with an
   error in `script.errors`.
 - Paths are relative to the project directory, not to the scene file.
+- **A spawned entity is missing in the same step**: `spawn_entity()` and
+  `despawn_owned` take effect after the step; look one step later.
+- **`action_axis` in a player's script** reads the local keyboard, not
+  that player's; use `player_input(entity.owner, ...)`.

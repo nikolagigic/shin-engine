@@ -24,7 +24,8 @@ mygame/
   shin.toml               project name, window settings, and entry scene
   src/main.rs             the game: systems, tools, window, --mcp, --serve, --host, --join
   scenes/main.scene.ron   the starter scene (the entry scene)
-  scripts/player.rhai     moves the cube with the input actions
+  scripts/player.rhai     moves a player's cube with that player's input actions
+  scripts/server.rhai     gives every player who joins a cube of their own
   assets/cube.gltf        the cube mesh the starter scene draws
   assets/cube.bin         its vertex buffer
   assets/sounds/blip.wav  a 0.2 s blip the moon plays once per revolution
@@ -212,10 +213,14 @@ spatial audio source and runs `scripts/moon.rhai`, which plays the blip
 each time the moon completes a revolution; see [Audio](audio.md).
 [Scenes](scenes.md) explains the format.
 
-The cube runs `scripts/player.rhai`. The arrow keys or the left stick
-slide it over the ground (`move_x`, `move_z`), and holding Space or the
-gamepad's south button lifts it (`jump`). Let go and it settles back.
-WASD stays on the fly camera.
+When play starts you join the game as player 1, even alone, and
+`scripts/server.rhai` gives you a cube of your own in front of the
+centre cube (every other player who joins gets one too; see
+[Multiplayer](multiplayer.md#players-and-input)). It runs
+`scripts/player.rhai`: the arrow keys or the left stick slide it over
+the ground (`move_x`, `move_z`), and holding Space or the gamepad's
+south button lifts it (`jump`). Let go and it settles back. WASD stays
+on the fly camera.
 
 ## Files for agents
 

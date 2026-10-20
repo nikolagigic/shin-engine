@@ -602,8 +602,9 @@ impl InputConfig {
     }
 }
 
-/// An action's current value.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// An action's current value. Serialisable, because multiplayer clients
+/// send theirs to the server in [`crate::net::InputFrame`]s (GE-044).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActionValue {
     /// Held: a button action with a binding down, or an axis action at
     /// or beyond [`PRESS_THRESHOLD`].

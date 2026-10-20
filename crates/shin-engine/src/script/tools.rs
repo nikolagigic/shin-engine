@@ -11,6 +11,7 @@ use crate::command::Affected;
 use crate::ecs::Entity;
 use crate::headless::Headless;
 use crate::input::Actions;
+use crate::net::PlayerInputs;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers `script.attach`, `script.eval`, and `script.errors`.
@@ -101,8 +102,14 @@ struct EvalArgs {
 
 fn script_eval(engine: &mut Headless, args: EvalArgs) -> anyhow::Result<ToolOutput> {
     let actions = crate::script::input::snapshot(engine.resources.get::<Actions>());
+    let inputs = engine
+        .resources
+        .get::<PlayerInputs>()
+        .cloned()
+        .unwrap_or_default();
     let scripts = script_engine(engine);
     *scripts.actions.borrow_mut() = actions;
+    *scripts.inputs.borrow_mut() = inputs;
     let value = scripts.eval(&args.source)?;
     Ok(ToolOutput::Json(
         json!({ "result": bindings::to_json(&value) }),

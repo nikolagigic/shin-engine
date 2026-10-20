@@ -6,7 +6,9 @@
 //! Three steps, split by what they need:
 //!
 //! 1. [`net_client_system`] (fixed, no GPU): polls the transport, says
-//!    [`Message::Hello`] when connected, tracks the [`ClientState`], and
+//!    [`Message::Hello`] when connected, tracks the [`ClientState`]
+//!    (inserting [`LocalPlayer`] once welcomed), sends the player's
+//!    [`Actions`] as an [`InputFrame`](super::InputFrame) (GE-044), and
 //!    files incoming snapshots in the [`SnapshotBuffer`]. The snapshot that
 //!    is due (the newest one at least [`SnapshotBuffer::delay`] ticks older
 //!    than the newest received) becomes pending.
@@ -27,11 +29,13 @@ use std::collections::VecDeque;
 
 use anyhow::Context as _;
 
+use super::players::{LocalPlayer, input_frame};
 use super::protocol::{Message, PROTOCOL_VERSION, Snapshot};
 use super::snapshot::apply;
-use super::transport::{Channel, Event, Transport};
+use super::transport::{Channel, Event, PeerId, Transport};
 use super::{NetId, NetIds, PlayerId};
 use crate::ecs::{Entity, Resources, Time, World};
+use crate::input::Actions;
 use crate::math::Transform;
 use crate::render::RenderState;
 
@@ -210,6 +214,10 @@ pub struct NetClient {
     state: ClientState,
     /// Received snapshots.
     buffer: SnapshotBuffer,
+    /// The server, once the transport has connected.
+    server: Option<PeerId>,
+    /// Client ticks run so far; stamps each [`InputFrame`](super::InputFrame).
+    ticks: u64,
 }
 
 impl NetClient {
@@ -228,6 +236,8 @@ impl NetClient {
             name: name.to_string(),
             state: ClientState::Connecting,
             buffer: SnapshotBuffer::new(delay),
+            server: None,
+            ticks: 0,
         }
     }
 
@@ -246,6 +256,7 @@ impl NetClient {
         for event in self.transport.poll() {
             match event {
                 Event::Connected(peer) => {
+                    self.server = Some(peer);
                     if self.state == ClientState::Connecting {
                         let hello = Message::Hello {
                             protocol: PROTOCOL_VERSION,
@@ -292,14 +303,30 @@ impl NetClient {
 ///
 /// Polls the transport (sending [`Message::Hello`] on connect, taking
 /// [`Message::Welcome`], filing snapshots, and moving to
-/// [`ClientState::Disconnected`] on a goodbye or a dropped connection),
-/// then, unless disconnected, advances the [`SnapshotBuffer`], which may
-/// make a snapshot pending for [`apply_pending`].
+/// [`ClientState::Disconnected`] on a goodbye or a dropped connection).
+/// Once welcomed, it keeps a [`LocalPlayer`] resource naming this client's
+/// player and sends the [`Actions`] resource (no actions without one) to
+/// the server as an unreliable [`Message::Input`] every tick. Then, unless
+/// disconnected, it advances the [`SnapshotBuffer`], which may make a
+/// snapshot pending for [`apply_pending`].
 pub fn net_client_system(_: &mut World, res: &mut Resources) {
-    let Some(client) = res.get_mut::<NetClient>() else {
+    let Some(client) = res.get::<NetClient>() else {
         return;
     };
+    let frame = input_frame(client.ticks, res.get::<Actions>());
+    let client = res.expect_mut::<NetClient>();
     client.handle_events();
+    client.ticks += 1;
+    if let (ClientState::Connected { player, .. }, Some(server)) = (&client.state, client.server) {
+        let player = *player;
+        client
+            .transport
+            .send(server, &Message::Input(frame), Channel::Unreliable);
+        if res.get::<LocalPlayer>() != Some(&LocalPlayer(player)) {
+            res.insert(LocalPlayer(player));
+        }
+    }
+    let client = res.expect_mut::<NetClient>();
     if !matches!(client.state, ClientState::Disconnected(_)) {
         client.buffer.advance();
     }

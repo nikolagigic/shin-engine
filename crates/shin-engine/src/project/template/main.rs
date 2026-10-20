@@ -16,13 +16,19 @@
 //! resources, so whatever an agent sees under `--mcp`, and whatever a
 //! server simulates, is the game itself. The server's port defaults to
 //! [`DEFAULT_PORT`].
-//! The moon's script (`scripts/moon.rhai`) blips once per revolution.
 //!
-//! Controls: the arrow keys or a gamepad's left stick move the cube and
+//! Every mode but `--join` is a server: playing alone (and under `--mcp`)
+//! the game is a server whose only player is you ([`NetServer::solo`]).
+//! So `scripts/server.rhai` gives every player, you included, a cube of
+//! their own, and `scripts/player.rhai` moves each cube with its owner's
+//! input. The moon's script (`scripts/moon.rhai`) blips once per
+//! revolution.
+//!
+//! Controls: the arrow keys or a gamepad's left stick move your cube and
 //! Space or its south button lifts it (the `move_x`, `move_z`, and `jump`
-//! actions bound in `shin.toml`, read by `scripts/player.rhai`); W/S
-//! forward and back, A/D strafe, E/Q up and down fly the camera; hold the
-//! right mouse button to look around; Escape quits.
+//! actions bound in `shin.toml`); W/S forward and back, A/D strafe, E/Q
+//! up and down fly the camera; hold the right mouse button to look
+//! around; Escape quits.
 
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -39,7 +45,7 @@ use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::net::{
     NetClient, NetServer, ServerOptions, Transport, net_client_system, net_interpolate_system,
-    net_server_system,
+    net_server_input_system, net_server_system,
 };
 use shin::physics::physics_system;
 use shin::project::Project;
@@ -108,8 +114,14 @@ fn orbit_system(world: &mut World, res: &mut Resources) {
 /// window and under `--mcp` alike. Under `--mcp`, scripts and physics
 /// run once `sim.play` has started play mode. Keep `physics` after
 /// systems that move kinematic bodies.
+///
+/// `net_server_input` comes first: on a server it takes in who joined and
+/// left and every player's input, so this tick's systems and scripts see
+/// them (it does nothing on a client). The snapshot half,
+/// `net_server_system`, goes last; the server modes append it.
 fn game_schedule() -> Schedule {
     let mut schedule = Schedule::new();
+    schedule.add_fixed("net_server_input", net_server_input_system);
     schedule.add_fixed("orbit", orbit_system);
     schedule.add_fixed("script", script_system);
     schedule.add_fixed("physics", physics_system);
@@ -157,7 +169,9 @@ fn entry_scene(project: &Project) -> Option<PathBuf> {
 
 /// Serves the game over MCP on stdio: the engine's tools plus
 /// [`register_game_tools`], on a headless engine running [`game_schedule`]
-/// with the project (and its entry scene) open.
+/// with the project (and its entry scene) open. Like a solo game it is a
+/// server with one local player, so `sim.play` gives the agent a cube
+/// that `input.set` moves.
 fn serve_mcp(project: Project) -> anyhow::Result<()> {
     let mut registry = ToolRegistry::with_engine_tools();
     register_game_tools(&mut registry, project.name.clone());
@@ -165,7 +179,10 @@ fn serve_mcp(project: Project) -> anyhow::Result<()> {
     shin_mcp::serve_stdio(registry, move || {
         let mut resources = Resources::new();
         add_game_resources(&mut resources);
-        let mut engine = Headless::from_parts(World::new(), resources, game_schedule(), size)?;
+        let mut schedule = game_schedule();
+        schedule.add_fixed("net_server", net_server_system);
+        resources.insert(NetServer::solo());
+        let mut engine = Headless::from_parts(World::new(), resources, schedule, size)?;
         engine.load_project(Path::new(ROOT))?;
         Ok(engine)
     })
@@ -272,40 +289,43 @@ fn load_scene(
 /// systems with `res.expect::<Actions>()`. Under `--mcp`,
 /// [`Headless::load_project`] installs them for `input.set`.
 ///
-/// With [`Net::Host`], the window is also a listen server: a
-/// [`NetServer`] runs in the same engine, last in the fixed schedule, and
-/// the person at the window is its local player one. With [`Net::Join`],
-/// it is a client: a [`NetClient`] joins the server, applies its
-/// snapshots, and interpolates the entities it replicates; the server's
-/// entities are not simulated here.
+/// Playing solo ([`Net::Solo`]), the window is a server nobody else can
+/// join ([`NetServer::solo`]), with the person at the window as its local
+/// player one; with [`Net::Host`], it is a listen server others join over
+/// the network. Either way the server runs in the same engine, its
+/// snapshot half last in the fixed schedule. With [`Net::Join`], it is a
+/// client: a [`NetClient`] joins the server, sends it this player's
+/// actions, applies its snapshots, and interpolates the entities it
+/// replicates; the server's entities are not simulated here.
 fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
     let mut schedule = game_schedule();
     schedule.add_frame("fly_camera", fly_camera_system);
-    match &net {
-        Net::Solo => {}
-        Net::Host(_) => {
-            schedule.add_fixed("net_server", net_server_system);
-        }
-        Net::Join(..) => {
-            schedule.add_fixed("net_client", net_client_system);
-            schedule.add_frame("net_interpolate", net_interpolate_system);
-        }
-    }
-    let mut game = EcsGame::new(World::new(), schedule);
-    match net {
-        Net::Solo => {}
+    let (server, client) = match net {
+        Net::Solo => (Some(NetServer::solo()), None),
         Net::Host(port) => {
             let opts = ServerOptions::default();
             let mut server = NetServer::new(server_transport(port)?, opts.snapshot_every);
             server.add_local_player();
-            game.resources.insert(server);
             log::info!("hosting `{}` on port {port}", project.name);
+            (Some(server), None)
         }
         Net::Join(addr, trust) => {
+            schedule.add_fixed("net_client", net_client_system);
+            schedule.add_frame("net_interpolate", net_interpolate_system);
             let client = NetClient::new(client_transport(&addr, &trust)?, &player_name());
-            game.resources.insert(client);
             log::info!("joining {addr}");
+            (None, Some(client))
         }
+    };
+    if server.is_some() {
+        schedule.add_fixed("net_server", net_server_system);
+    }
+    let mut game = EcsGame::new(World::new(), schedule);
+    if let Some(server) = server {
+        game.resources.insert(server);
+    }
+    if let Some(client) = client {
+        game.resources.insert(client);
     }
     game.title = project.window.title.clone();
     add_game_resources(&mut game.resources);

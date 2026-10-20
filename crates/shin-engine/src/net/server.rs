@@ -11,28 +11,42 @@
 //!   a local player ([`NetServer::add_local_player`]) that needs no
 //!   transport.
 //!
-//! Each tick, [`net_server_system`] answers [`Message::Hello`] with
-//! [`Message::Welcome`] (or the [`reject_version`] goodbye), drops players
-//! that say [`Message::Goodbye`] or disconnect, and on every
-//! `snapshot_every`-th tick (ticks 0, `n`, `2n`, ...) [`capture`]s the
-//! world and sends it to every player. Join and leave are logged.
+//! A server tick has two halves (GE-044):
+//!
+//! 1. [`net_server_input_system`], first in the fixed schedule: answers
+//!    [`Message::Hello`] with [`Message::Welcome`] (or the
+//!    [`reject_version`] goodbye), drops players that say
+//!    [`Message::Goodbye`] or disconnect, and updates [`PlayerInputs`]
+//!    from the [`Message::Input`] frames received, so this tick's game
+//!    systems see them. Join and leave are logged.
+//! 2. [`net_server_system`], last: on every `snapshot_every`-th tick
+//!    (ticks 0, `n`, `2n`, ...) [`capture`]s the world and sends it to
+//!    every player, then advances the tick. If the first half did not run
+//!    this tick (it is not in the schedule), this one runs it first, so a
+//!    server works with `net_server_system` alone, with input a tick later.
+//!
+//! [`NetServer::solo`] is a server with nobody to serve but the local
+//! player: single-player games run the same scripts as multiplayer ones.
 //!
 //! [`Snapshot`]: super::Snapshot
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::protocol::{Message, reject_version};
+use super::players::PlayerInputs;
+use super::protocol::{InputFrame, Message, reject_version};
 use super::snapshot::capture;
-use super::transport::{Channel, Event, PeerId, Transport};
+use super::transport::{Channel, Event, LoopbackTransport, PeerId, Transport};
 use super::{PlayerId, Snapshot};
 use crate::app::FixedTimestep;
 use crate::ecs::{ExitRequest, Resources, Time, World};
 use crate::headless::Headless;
+use crate::input::Actions;
 
 /// Resource: the server end of a multiplayer session. Add it to the
-/// engine's resources and run [`net_server_system`] as the last fixed
-/// system (or let [`run_server`] do both).
+/// engine's resources and run [`net_server_input_system`] as the first
+/// fixed system and [`net_server_system`] as the last (or let
+/// [`run_server`] add the server and the last one).
 pub struct NetServer {
     /// Where clients connect.
     transport: Box<dyn Transport + Send>,
@@ -46,6 +60,10 @@ pub struct NetServer {
     tick: u64,
     /// A snapshot goes out on every tick divisible by this.
     snapshot_every: u32,
+    /// Input frames received since the last tick, by sender.
+    frames: Vec<(PlayerId, InputFrame)>,
+    /// Whether this tick's input half has run.
+    received: bool,
 }
 
 impl NetServer {
@@ -59,7 +77,21 @@ impl NetServer {
             next_player: 1,
             tick: 0,
             snapshot_every: snapshot_every.max(1),
+            frames: Vec::new(),
+            received: false,
         }
+    }
+
+    /// A server for a single-player game: no network (a
+    /// [`LoopbackTransport`] nobody else holds) and one local player,
+    /// `PlayerId(1)`. Run with the server systems, it makes a solo game
+    /// behave like a listen server nobody joins: the same scripts greet
+    /// the player and read its input.
+    pub fn solo() -> Self {
+        let (transport, _) = LoopbackTransport::pair(0);
+        let mut server = Self::new(Box::new(transport), ServerOptions::default().snapshot_every);
+        server.add_local_player();
+        server
     }
 
     /// Adds the host's own player on a listen server and returns its id
@@ -74,6 +106,11 @@ impl NetServer {
         self.local = Some(id);
         log::info!("net: local player {} joined", id.0);
         id
+    }
+
+    /// The host's own player, if [`Self::add_local_player`] added one.
+    pub fn local_player(&self) -> Option<PlayerId> {
+        self.local
     }
 
     /// Every player in the session, local and remote, in id order.
@@ -117,9 +154,10 @@ impl NetServer {
                 Event::Message(peer, Message::Goodbye { reason }) => {
                     self.leave(peer, &format!("said goodbye: {reason}"));
                 }
-                Event::Message(_, Message::Input(_)) => {
-                    // Player input is GE-044.
-                }
+                Event::Message(peer, Message::Input(frame)) => match self.players.get(&peer) {
+                    Some(&player) => self.frames.push((player, frame)),
+                    None => log::debug!("net: input from peer {} before joining", peer.0),
+                },
                 Event::Message(peer, other) => {
                     log::warn!(
                         "net: ignoring an unexpected message from peer {}: {other:?}",
@@ -188,20 +226,50 @@ impl NetServer {
     }
 }
 
-/// Fixed system: one server tick. Run it last in the fixed schedule, so
-/// snapshots carry what this step's systems did. Does nothing without a
-/// [`NetServer`] resource.
+/// Fixed system: the first half of a server tick. Run it first in the
+/// fixed schedule, so the game systems after it see this tick's input.
+/// Does nothing without a [`NetServer`] resource.
 ///
-/// Polls the transport (hello → welcome, goodbye or disconnect → leave),
-/// then on ticks divisible by `snapshot_every` captures the replicated
-/// world ([`capture`], at the server's tick) and sends it to every remote
-/// player, then advances the tick.
-pub fn net_server_system(world: &mut World, res: &mut Resources) {
+/// Polls the transport (hello → welcome, goodbye or disconnect → leave,
+/// input frames kept), then updates the [`PlayerInputs`] resource
+/// (inserting one if missing): players who left are dropped, each remote
+/// player's newest frame is applied, and the local player's input is
+/// copied from the [`Actions`] resource.
+pub fn net_server_input_system(_: &mut World, res: &mut Resources) {
     let fixed_dt = res.get::<Time>().map_or(1.0 / 60.0, |time| time.fixed_dt);
     let Some(server) = res.get_mut::<NetServer>() else {
         return;
     };
     server.handle_events(fixed_dt);
+    server.received = true;
+    let frames = std::mem::take(&mut server.frames);
+    let players = server.players();
+    let local = server.local;
+    let mut inputs = res
+        .get_mut::<PlayerInputs>()
+        .map(std::mem::take)
+        .unwrap_or_default();
+    inputs.begin_tick(&players, frames, local.zip(res.get::<Actions>()));
+    res.insert(inputs);
+}
+
+/// Fixed system: the second half of a server tick. Run it last in the
+/// fixed schedule, so snapshots carry what this step's systems did. Does
+/// nothing without a [`NetServer`] resource.
+///
+/// Runs [`net_server_input_system`] first if that has not run this tick,
+/// then on ticks divisible by `snapshot_every` captures the replicated
+/// world ([`capture`], at the server's tick) and sends it to every remote
+/// player, then advances the tick.
+pub fn net_server_system(world: &mut World, res: &mut Resources) {
+    let Some(server) = res.get::<NetServer>() else {
+        return;
+    };
+    if !server.received {
+        net_server_input_system(world, res);
+    }
+    let server = res.expect_mut::<NetServer>();
+    server.received = false;
     let tick = server.tick;
     if server.snapshot_due() {
         let snapshot = capture(world, res, tick);
@@ -229,7 +297,9 @@ impl Default for ServerOptions {
 /// Ctrl-C).
 ///
 /// Inserts a [`NetServer`] on `transport`, appends [`net_server_system`]
-/// to the fixed schedule (so it runs last; do not add it yourself),
+/// to the fixed schedule (so it runs last; do not add it yourself; do add
+/// [`net_server_input_system`] first in the schedule, or input reaches
+/// the game a tick later),
 /// starts play mode ([`Headless::play`]), and then steps the engine at
 /// [`Headless::fixed_dt`] by the wall clock, sleeping between ticks and
 /// catching up after a slow one. Every 10 seconds it logs the tick and

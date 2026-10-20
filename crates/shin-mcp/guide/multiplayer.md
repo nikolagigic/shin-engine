@@ -1,10 +1,11 @@
 # Multiplayer
 
 Multiplayer is being built in this milestone. This page describes the
-model and the parts that exist today. A game can already run as a
-server ([Hosting](#hosting)) and as a client ([Joining](#joining)), but
-until the network transport lands the two can only talk inside one
-process (see [Coming in this milestone](#coming-in-this-milestone)).
+model and the parts that exist today: a game runs as a server
+([Hosting](#hosting)) and as a client ([Joining](#joining)) over the
+network ([Over the network](#over-the-network)), and players control
+their own entities ([Players and input](#players-and-input)). What is
+still to come is listed [at the end](#coming-in-this-milestone).
 
 ## The model
 
@@ -95,7 +96,7 @@ all the same server underneath:
 ```sh
 cargo run -- --serve            # dedicated: no window
 cargo run -- --host             # listen server: you play in the window and host
-cargo run                       # solo: just you
+cargo run                       # solo: a server only you play on
 ```
 
 Both server modes take `--port N` (default 7777). `shin serve <dir>`
@@ -116,24 +117,37 @@ INFO  net: tick 600, 1 player(s)
 
 A **listen server** (`--host`) is the normal game window with the server
 running in the same engine. The person at the window is player one and
-needs no connection; everyone else joins over the network.
+needs no connection; everyone else joins over the network. **Solo** play
+is the same with no network: the game is a server whose only player is
+you (`NetServer::solo()`), so the scripts that run a multiplayer game run
+a single-player one too (see [Players and input](#players-and-input)).
+The template runs `--mcp` the same way.
 
-Each tick, after all your systems, the server:
+A server tick has two halves. **First**, before your systems, the server:
 
 1. answers each joining client's `Hello` with a `Welcome` (its player id,
    the server's current tick, and the timestep), or turns it away if its
    protocol version differs;
 2. forgets players who said `Goodbye` or disconnected;
-3. every third tick (ticks 0, 3, 6, ...: 20 snapshots a second) captures
-   the replicated entities and sends the snapshot to every player.
+3. takes in the input every player sent (see
+   [Players and input](#players-and-input)).
+
+Then your systems and scripts run, seeing this tick's players and input.
+**Last**, every third tick (ticks 0, 3, 6, ...: 20 snapshots a second),
+it captures the replicated entities and sends the snapshot to every
+player.
 
 When a dedicated server stops on its own (a system sets `ExitRequest`),
 it sends every player a `Goodbye` first.
 
 In Rust, the pieces are in `shin::net`: `NetServer` (a resource holding
-the transport and players), `net_server_system` (add it last to the fixed
-schedule), and `run_server`, which does both on a headless engine and runs
-the dedicated loop. The template's `src/main.rs` shows both modes.
+the transport and players), `net_server_input_system` (the first half:
+add it first to the fixed schedule), `net_server_system` (the second
+half: add it last), and `run_server`, which inserts the server and adds
+`net_server_system` on a headless engine and runs the dedicated loop. A
+schedule without `net_server_input_system` still works, with input
+reaching the game a tick later. The template's `src/main.rs` shows every
+mode.
 
 ## Joining
 
@@ -181,6 +195,88 @@ game.resources.insert(NetClient::new(transport, "ada"));
 
 `NetClient::state()` says where the session is: `Connecting`,
 `Connected { player, server_tick }`, or `Disconnected(reason)`.
+
+## Players and input
+
+A player must be able to do something. Every tick, a client sends the
+server its **input actions** (the ones bound in `shin.toml`; see
+[Input actions](scripting.md#input-actions)) in an `Input` message. The
+message lists every action that is not at rest (held, off-centre, or just
+pressed), so each one is complete on its own: it travels unreliably, and
+a lost one is corrected by the next.
+
+The server keeps each player's newest input in the `PlayerInputs`
+resource, updated in the first half of every tick:
+
+- an action stays as the newest message says until a newer one arrives;
+  messages that arrive late are ignored;
+- `just_pressed` lasts exactly one tick, and a press is not lost when two
+  messages arrive in one tick or the message carrying it is lost;
+- the host's own player (on a listen server or solo) sends nothing: its
+  input is the local `Actions` resource.
+
+A client knows which player it is from the `LocalPlayer` resource, which
+appears once the server welcomes it.
+
+### Scripts and players
+
+Player logic lives in the **server script**, `scripts/server.rhai` in the
+project. It belongs to no entity. Wherever the game is the server (solo,
+`--host`, `--serve`), the engine calls its `on_player_join(id)` once when
+a player joins and `on_player_leave(id)` once when they leave, before
+the entity scripts of that tick. Both are optional. Joining clients never
+run it.
+
+```rhai
+// scripts/server.rhai
+fn on_player_join(id) {
+    spawn_entity()
+        .name(`player ${id}`)
+        .mesh("assets/cube.gltf")
+        .at(vec3(1.5 * (id - 1), 0.5, 2.5))
+        .script("scripts/player.rhai")
+        .replicated(true)
+        .owner(id);
+}
+
+fn on_player_leave(id) {
+    despawn_owned(id);
+}
+```
+
+The cube's own script reads its owner's input:
+
+```rhai
+// scripts/player.rhai
+fn update(entity, dt) {
+    let p = entity.transform.translation;
+    p.x += player_input(entity.owner, "move_x") * 3.0 * dt;
+    if player_input_pressed(entity.owner, "jump") { p.y += 4.0 * dt; }
+    entity.transform.translation = p;
+}
+```
+
+[Scripting](scripting.md#players) lists the functions. This is what a
+new project does: each player who joins gets a cube of their own in
+front of the centre cube, which they move with the arrow keys and lift
+with Space, and their cube goes when they leave. Played solo, you are
+player 1 and the same scripts give you your cube.
+
+Stopping play (in the editor, or `sim.stop`) puts the world back and
+forgets who joined, so the next play greets the players again.
+
+In Rust, read `PlayerInputs` from a system on the server:
+
+```rust
+use shin::net::{Owner, PlayerInputs};
+
+fn move_players(world: &mut World, res: &mut Resources) {
+    let inputs = res.expect::<PlayerInputs>();
+    for (owner, transform) in world.query_mut::<(&Owner, &mut Transform)>() {
+        transform.translation.x += inputs.axis(owner.0, "move_x") * 0.05;
+    }
+}
+```
 
 ## Interpolation
 
@@ -291,8 +387,6 @@ encoding and decoding (tens of microseconds for 1000 entities).
 
 ## Coming in this milestone
 
-- Player inputs sent to the server, and script hooks for players joining
-  and leaving.
 - Host and Join in the editor, and `net.*` tools to host, join, and
   inspect a session.
 - Client-side prediction for the player's own entity.
