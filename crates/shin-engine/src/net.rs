@@ -23,7 +23,8 @@
 //!   clients become the server's [`PlayerInputs`]; a client knows itself
 //!   as [`LocalPlayer`].
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
-//!   [`LoopbackTransport`], an in-process implementation for tests.
+//!   [`LoopbackTransport`], an in-process implementation for tests, with
+//!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
 //!
 //! Tools: [`register_tools`] adds `net.status`.
 
@@ -55,7 +56,7 @@ pub use server::{
 };
 pub use snapshot::{apply, capture};
 pub use tools::register_tools;
-pub use transport::{Channel, Event, LoopbackTransport, PeerId, Transport};
+pub use transport::{Channel, Event, LoopbackOptions, LoopbackTransport, PeerId, Transport};
 
 /// An entity's identity on the network: the same on the server and every
 /// client, and never reused within a session.

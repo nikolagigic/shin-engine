@@ -83,7 +83,8 @@ Peers exchange a small set of messages, encoded compactly in binary:
 differs from the server's is turned away with a `Goodbye` that says so.
 
 Messages travel over a **transport**. The engine ships an in-process
-loopback transport used by the tests; the `shin-net` crate provides the
+loopback transport used by the tests (it can simulate latency and loss;
+see [Contributing](contributing.md#multiplayer-tests)); the `shin-net` crate provides the
 network transport, QUIC (see [Over the network](#over-the-network)).
 
 ## Hosting
@@ -361,6 +362,23 @@ and `QuicTransport::connect(addr, &trust)` a client one, where `trust` is
 `NetServer::new(Box::new(transport), ...)`. The template's
 `server_transport` and `client_transport` functions are the examples.
 
+## Bandwidth
+
+Every snapshot carries every replicated entity in full (delta snapshots
+are coming). A typical prop (a name, a transform, a mesh source such as
+`builtin://cube`, and a colour) takes about 84 bytes, so:
+
+| Replicated entities | Bytes per snapshot | Per client at 20 snapshots/s |
+|--------------------:|-------------------:|-----------------------------:|
+| 100                 | 8,298              | about 166 KB/s               |
+| 1000                | 84,773             | about 1.7 MB/s               |
+
+Shorter names and mesh sources make entities smaller; a child entity
+adds a few bytes for its parent. Snapshots bigger than one datagram (about
+1200 bytes) travel on the reliable stream (see
+[Over the network](#over-the-network)). The numbers come from
+`cargo bench -p shin-engine --bench net_snapshot`, which also times
+encoding and decoding (tens of microseconds for 1000 entities).
 
 ## Tools
 
