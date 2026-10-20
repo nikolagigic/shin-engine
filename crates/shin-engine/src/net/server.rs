@@ -94,7 +94,7 @@ impl NetServer {
         let bye = Message::Goodbye {
             reason: reason.to_string(),
         };
-        for (&peer, _) in self.players.iter() {
+        for &peer in self.players.keys() {
             self.transport.send(peer, &bye, Channel::Reliable);
         }
         self.players.clear();
@@ -232,7 +232,8 @@ impl Default for ServerOptions {
 /// to the fixed schedule (so it runs last; do not add it yourself),
 /// starts play mode ([`Headless::play`]), and then steps the engine at
 /// [`Headless::fixed_dt`] by the wall clock, sleeping between ticks and
-/// catching up after a slow one. On exit it sends every player a goodbye.
+/// catching up after a slow one. Every 10 seconds it logs the tick and
+/// the number of players. On exit it sends every player a goodbye.
 ///
 /// `sim.*` and the other tools keep working on the engine between calls
 /// to this function; while it runs, it owns the engine.
@@ -257,6 +258,7 @@ pub fn run_server(
 
     let mut timestep = FixedTimestep::new(engine.fixed_dt);
     let mut last = Instant::now();
+    let mut last_status = last;
     loop {
         let now = Instant::now();
         let steps = timestep.advance((now - last).as_secs_f64()).steps;
@@ -272,10 +274,22 @@ pub fn run_server(
                 return Ok(());
             }
         }
-        // Sleep until about when the next tick is due.
+        if now - last_status >= STATUS_EVERY {
+            last_status = now;
+            let server = engine.resources.expect::<NetServer>();
+            log::info!(
+                "net: tick {}, {} player(s)",
+                server.tick(),
+                server.players().len()
+            );
+        }
+        // Wake twice per tick, so a tick is late by at most half a step.
         std::thread::sleep(Duration::from_secs_f64(engine.fixed_dt / 2.0));
     }
 }
+
+/// How often [`run_server`] logs the tick and player count.
+const STATUS_EVERY: Duration = Duration::from_secs(10);
 
 fn exit_requested(engine: &Headless) -> bool {
     engine

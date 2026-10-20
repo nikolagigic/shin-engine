@@ -634,6 +634,19 @@ The doc comments on the arguments become the tool's JSON schema, which is
 what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 `game_schedule` in `src/main.rs` run under `--mcp` too.
 
+## Multiplayer
+
+```sh
+cargo run -- --serve            # a dedicated server: no window
+cargo run -- --host             # play in a window and host
+```
+
+Both run the game's own systems as the authority and send snapshots of
+the replicated entities to joined players; `--port N` picks the port
+(default 7777), and Ctrl-C stops a dedicated server. `shin serve .` is
+the same as `cargo run -- --serve`. The network transport is not built
+yet, so for now no other process can join.
+
 ## Controls
 
 - Arrow keys or left stick: move the cube; Space or gamepad south: lift it
@@ -645,7 +658,7 @@ what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 
 ```
 shin.toml       project name, window settings, entry scene, input actions
-src/main.rs     the game: systems, tools, window and --mcp modes
+src/main.rs     the game: systems, tools, window, --mcp, --serve, --host
 scenes/         scene files (.scene.ron)
 scripts/        Rhai scripts (player.rhai drives the cube; moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)

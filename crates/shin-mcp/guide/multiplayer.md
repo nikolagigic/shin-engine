@@ -1,7 +1,8 @@
 # Multiplayer
 
 Multiplayer is being built in this milestone. This page describes the
-model and the parts that exist today; hosting and joining a game are not
+model and the parts that exist today. A game can already run as a
+server ([Hosting](#hosting)); joining one from another process is not
 available yet (see [Coming in this milestone](#coming-in-this-milestone)).
 
 ## The model
@@ -83,6 +84,60 @@ Messages travel over a **transport**. The engine ships an in-process
 loopback transport used by the tests; the network transport comes later in
 this milestone.
 
+## Hosting
+
+The server is the game itself: your project's binary, running its own
+systems, with a network server attached. There are three ways to run it,
+all the same server underneath:
+
+```sh
+cargo run -- --serve            # dedicated: no window
+cargo run -- --host             # listen server: you play in the window and host
+cargo run                       # solo: just you
+```
+
+Both server modes take `--port N` (default 7777). `shin serve <dir>`
+is a shortcut for `cargo run -- --serve` in the project directory.
+
+A **dedicated** server opens no window. It loads the project and its
+entry scene, starts play mode, and steps the simulation at the fixed rate
+(60 ticks per second by default) by the wall clock until you press
+Ctrl-C. It logs where it listens, every player who joins or leaves, and
+every 10 seconds the tick and player count:
+
+```text
+INFO  serving `mygame` on port 7777; press Ctrl-C to stop
+INFO  net: server running at 60 ticks per second, a snapshot every 3 tick(s)
+INFO  net: `ada` joined as player 1 (peer 1)
+INFO  net: tick 600, 1 player(s)
+```
+
+A **listen server** (`--host`) is the normal game window with the server
+running in the same engine. The person at the window is player one and
+needs no connection; everyone else joins over the network.
+
+Each tick, after all your systems, the server:
+
+1. answers each joining client's `Hello` with a `Welcome` (its player id,
+   the server's current tick, and the timestep), or turns it away if its
+   protocol version differs;
+2. forgets players who said `Goodbye` or disconnected;
+3. every third tick (ticks 0, 3, 6, ...: 20 snapshots a second) captures
+   the replicated entities and sends the snapshot to every player.
+
+When a dedicated server stops on its own (a system sets `ExitRequest`),
+it sends every player a `Goodbye` first.
+
+> **Not yet networked.** The network transport arrives later in this
+> milestone. Until then both server modes run on an in-process loopback:
+> they start, simulate, and log as described, but the port is not opened
+> and no other process can join. The game logs a warning saying so.
+
+In Rust, the pieces are in `shin::net`: `NetServer` (a resource holding
+the transport and players), `net_server_system` (add it last to the fixed
+schedule), and `run_server`, which does both on a headless engine and runs
+the dedicated loop. The template's `src/main.rs` shows both modes.
+
 ## Tools
 
 `net.status` reports the engine's multiplayer role. Today that is always
@@ -90,7 +145,6 @@ this milestone.
 
 ## Coming in this milestone
 
-- A server that accepts players and broadcasts snapshots.
 - A client that joins with `--join`, applies snapshots, and smooths remote
   entities between them (interpolation).
 - Player inputs sent to the server, and script hooks for players joining
