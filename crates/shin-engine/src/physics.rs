@@ -51,7 +51,7 @@
 
 mod tools;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rapier3d::dynamics::{RigidBodyBuilder, RigidBodyHandle};
 use rapier3d::geometry::{ColliderBuilder, ColliderHandle, Ray, SharedShape};
@@ -381,7 +381,11 @@ impl PhysicsWorld {
     /// Makes the simulation match `world`'s physics components (see the
     /// [module docs](self)).
     fn sync(&mut self, world: &World) {
-        let mut wanted: HashMap<Entity, (Source, Transform)> = HashMap::new();
+        // Ordered by entity so rapier bodies are created in the same order
+        // every run: a hash map's order changes per process, and rapier's
+        // results depend on insertion order, which made the tolerance-zero
+        // net golden flip an edge pixel about once in twenty runs.
+        let mut wanted: BTreeMap<Entity, (Source, Transform)> = BTreeMap::new();
         for (entity, transform, body, collider) in world
             .query::<(Entity, &Transform, Option<&RigidBody>, Option<&Collider>)>()
             .without::<&RemoteEntity>()
@@ -408,7 +412,7 @@ impl PhysicsWorld {
             wanted.insert(entity, (source, *transform));
         }
 
-        let stale: Vec<Entity> = self
+        let mut stale: Vec<Entity> = self
             .tracked
             .iter()
             .filter(|(entity, tracked)| {
@@ -418,6 +422,7 @@ impl PhysicsWorld {
             })
             .map(|(entity, _)| *entity)
             .collect();
+        stale.sort_unstable();
         for entity in stale {
             self.remove(entity);
         }
