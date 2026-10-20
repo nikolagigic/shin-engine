@@ -444,3 +444,40 @@ fn a_solo_server_drives_the_local_cube_with_local_actions() -> anyhow::Result<()
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+/// An agent drives the solo player through the tool registry, as under
+/// `--mcp`: `input.set` moves its cube under `sim.step`, and `script.eval`
+/// reads the same player input scripts do.
+#[test]
+fn tools_drive_the_solo_player() -> anyhow::Result<()> {
+    use serde_json::json;
+
+    use crate::tool::{ToolOutput, ToolRegistry};
+
+    let dir = project_dir("tools", SERVER_RHAI, PLAYER_RHAI);
+    let mut engine = server_engine(&dir, NetServer::solo())?;
+    let reg = ToolRegistry::with_engine_tools();
+    reg.call(&mut engine, "sim.step", json!({ "steps": 1 }))?;
+    let start = owned(&engine)[0].2;
+    let set = json!({ "action": "jump", "pressed": true });
+    reg.call(&mut engine, "input.set", set)?;
+    reg.call(&mut engine, "sim.step", json!({ "steps": 15 }))?;
+    let lifted = owned(&engine)[0].2 - start;
+    assert!(lifted.y > 0.5, "jump lifts the cube: {lifted}");
+
+    let source = r#"[player_input_pressed(1, "jump"), player_input(1, "move_x")]"#;
+    let ToolOutput::Json(out) =
+        reg.call(&mut engine, "script.eval", json!({ "source": source }))?
+    else {
+        panic!("expected JSON");
+    };
+    assert_eq!(out["result"], json!([true, 0.0]));
+    let unknown = json!({ "source": r#"player_input(1, "fly")"# });
+    let err = reg.call(&mut engine, "script.eval", unknown).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("unknown action `fly`"),
+        "{err:#}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
