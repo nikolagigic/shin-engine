@@ -232,8 +232,8 @@ on the fly camera.
   live, and how to add a game tool, with a link to this guide.
 - **`.claude/skills/<name>/SKILL.md`** for each of the
   [agent skills](agents-skills.md): `shin-scene-building`,
-  `shin-visual-debugging`, `shin-scripting`, and `shin-project`. Claude
-  Code discovers project skills in that folder and uses one when a task
+  `shin-visual-debugging`, `shin-scripting`, `shin-project`, and
+  `shin-multiplayer`. Claude Code discovers project skills in that folder and uses one when a task
   matches its description. Other MCP clients get the same skills as
   prompts from the server.
 
