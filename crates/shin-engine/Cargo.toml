@@ -48,4 +48,8 @@ rapier3d = { workspace = true }
 gilrs = { workspace = true }
 postcard = { workspace = true }
 
+[[bench]]
+name = "net_snapshot"
+harness = false
+
 [dev-dependencies]

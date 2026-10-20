@@ -237,7 +237,10 @@ impl LoopbackTransport {
             && self.opts.drop_unreliable > 0.0
             && self.rng.next_f64() < self.opts.drop_unreliable;
         if lost {
-            log::trace!("loopback: simulated loss of a message to {:?}", self.links[index].peer);
+            log::trace!(
+                "loopback: simulated loss of a message to {:?}",
+                self.links[index].peer
+            );
             return;
         }
         let delay = u64::from(self.opts.latency_ticks) + self.rng.up_to(self.opts.jitter_ticks);

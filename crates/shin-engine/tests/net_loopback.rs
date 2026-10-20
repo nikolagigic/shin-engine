@@ -47,10 +47,8 @@ struct StarterProject(PathBuf);
 
 impl StarterProject {
     fn create(label: &str) -> anyhow::Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
-            "shin-net-loopback-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("shin-net-loopback-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         project::create(&NewProjectOptions {
             name: "net-loopback".into(),
