@@ -25,6 +25,7 @@ use crate::ecs::{self, ExitRequest, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 use crate::input::{Actions, GamepadState, Gamepads, InputState, actions_system};
 use crate::net;
+use crate::script;
 use crate::stats::{FrameStats, frame_stats_system};
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
@@ -308,13 +309,18 @@ impl Game for EcsGame {
         depth: &wgpu::TextureView,
         alpha: f64,
     ) {
-        // The fixed steps just ran; show the snapshot they made due.
+        // The fixed steps just ran; show the snapshot they made due, and
+        // the entities scripts spawned or despawned.
         if let Err(err) = net::apply_pending(
             &mut self.world,
             &mut self.resources,
             &ctx.device,
             &ctx.queue,
         ) {
+            log::error!("{err:#}");
+        }
+        if let Err(err) = script::apply_commands(&mut self.world, &mut self.resources, &ctx.device)
+        {
             log::error!("{err:#}");
         }
         self.begin_frame(alpha);

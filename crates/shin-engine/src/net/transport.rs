@@ -244,7 +244,14 @@ mod tests {
             } else {
                 Channel::Unreliable
             };
-            clients[0].send(PeerId(0), &Message::Input(InputFrame { tick }), channel);
+            clients[0].send(
+                PeerId(0),
+                &Message::Input(InputFrame {
+                    tick,
+                    actions: Vec::new(),
+                }),
+                channel,
+            );
         }
         let ticks: Vec<u64> = messages(server.poll())
             .into_iter()

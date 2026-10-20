@@ -9,11 +9,12 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::{NetId, PlayerId};
+use crate::input::ActionValue;
 use crate::scene::TransformDesc;
 
 /// The wire-format version. Bump it whenever [`Message`] or anything it
 /// contains changes shape, since postcard is not self-describing.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Everything a server and a client send each other.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,11 +85,20 @@ pub struct EntitySnap {
     pub owner: Option<PlayerId>,
 }
 
-/// A player's input for one tick. GE-044 adds the actions.
+/// A player's input for one client tick (GE-044): the client's
+/// [`crate::input::Actions`] as they stood when it was sent.
+///
+/// Only actions that are not at rest are listed (held, off-centre, or
+/// just pressed); an action missing from the frame is released with axis
+/// `0`. So every frame is complete on its own, and a lost frame is
+/// corrected by the next one.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InputFrame {
-    /// The client tick the input was sampled at.
+    /// The client tick the input was sampled at. Counts up, so the server
+    /// can tell the newest frame and drop late ones.
     pub tick: u64,
+    /// Every action not at rest, by name, in name order.
+    pub actions: Vec<(String, ActionValue)>,
 }
 
 /// `msg` as bytes.
@@ -171,7 +181,28 @@ mod tests {
             },
             Message::Snapshot(snapshot()),
             Message::Snapshot(Snapshot::default()),
-            Message::Input(InputFrame { tick: 77 }),
+            Message::Input(InputFrame::default()),
+            Message::Input(InputFrame {
+                tick: 77,
+                actions: vec![
+                    (
+                        "jump".into(),
+                        ActionValue {
+                            pressed: true,
+                            just_pressed: true,
+                            axis: 1.0,
+                        },
+                    ),
+                    (
+                        "move_x".into(),
+                        ActionValue {
+                            pressed: false,
+                            just_pressed: false,
+                            axis: -0.25,
+                        },
+                    ),
+                ],
+            }),
             Message::Goodbye {
                 reason: "bye".into(),
             },

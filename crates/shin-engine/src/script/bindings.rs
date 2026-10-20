@@ -6,9 +6,9 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
-//!   the parent), and `world_transform` (read-only; a copy, as of the
-//!   start of the step).
+//! - `Entity`: fields `id`, `name`, and `owner` (read-only), `transform`
+//!   (local to the parent), and `world_transform` (read-only; a copy, as
+//!   of the start of the step).
 //! - `time()`: simulated seconds since play started.
 //! - `play_sound(path)` and `play_sound_at(entity, path)` (GE-036): queue
 //!   a sound; [`super::script_system`] plays the queue after the scripts
@@ -52,6 +52,9 @@ pub(crate) struct ScriptEntity {
     pub(crate) id: INT,
     /// Its [`crate::ecs::Name`], or empty.
     pub(crate) name: String,
+    /// The id of the player who owns it ([`crate::net::Owner`]), or `0`
+    /// (player ids start at 1).
+    pub(crate) owner: INT,
     /// Its transform (local to its parent), written back after the call.
     pub(crate) transform: ScriptTransform,
     /// Its world-space transform at the start of the step (GE-031);
@@ -161,6 +164,7 @@ fn register_entity(engine: &mut Engine) {
         .register_type_with_name::<ScriptEntity>("Entity")
         .register_get("id", |e: &mut ScriptEntity| e.id)
         .register_get("name", |e: &mut ScriptEntity| e.name.clone())
+        .register_get("owner", |e: &mut ScriptEntity| e.owner)
         // A fresh copy each read: writing to it changes nothing.
         .register_get("world_transform", |e: &mut ScriptEntity| {
             ScriptTransform(Rc::new(RefCell::new(e.world)))

@@ -38,7 +38,7 @@ use crate::math::Transform;
 use crate::physics::{Collider, PhysicsWorld, RigidBody};
 use crate::render::MeshInstance;
 use crate::scene::{self, SceneFile};
-use crate::script::Script;
+use crate::script::{Script, ScriptEngine};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Resource: whether the scene is being edited or played. [`Headless`]
@@ -161,8 +161,10 @@ impl Headless {
     }
 
     /// Stops playing: stops every sound, tears down the physics
-    /// simulation, restores the scene, entity ids, and [`Time`] captured
-    /// by [`Self::play`], and sets [`PlayState::Edit`]. Returns `false`
+    /// simulation, makes scripts forget which players joined (so the next
+    /// play greets them again) and drop their queued spawns, restores the
+    /// scene, entity ids, and [`Time`] captured by [`Self::play`], and
+    /// sets [`PlayState::Edit`]. Returns `false`
     /// (and changes nothing) if nothing was playing.
     ///
     /// Fails, still playing, if the snapshot cannot be loaded back.
@@ -183,6 +185,9 @@ impl Headless {
         restore_ids(&mut self.world, &spawned, &snapshot.ids)?;
         if let Some(physics) = self.resources.get_mut::<PhysicsWorld>() {
             physics.clear();
+        }
+        if let Some(scripts) = self.resources.get_mut::<ScriptEngine>() {
+            scripts.reset_session();
         }
         self.resources.insert(snapshot.time);
         self.resources.insert(PlayState::Edit);

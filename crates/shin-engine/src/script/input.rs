@@ -50,19 +50,24 @@ pub(crate) fn register(engine: &mut Engine, snapshot: ActionSnapshot) {
 /// The value of `name`, or a runtime error naming it and the actions that
 /// exist.
 fn lookup(snapshot: &ActionSnapshot, name: &str) -> Result<ActionValue, Box<EvalAltResult>> {
+    check(snapshot, name)?;
+    Ok(snapshot.borrow()[name])
+}
+
+/// Ok if the project defines `name`, otherwise a runtime error naming it
+/// and the actions that exist. `player_input` checks names with it too.
+pub(crate) fn check(snapshot: &ActionSnapshot, name: &str) -> Result<(), Box<EvalAltResult>> {
     let snapshot = snapshot.borrow();
-    snapshot.get(name).copied().ok_or_else(|| {
-        let names: Vec<&str> = snapshot.keys().map(String::as_str).collect();
-        format!(
-            "unknown action `{name}`; actions: {}",
-            if names.is_empty() {
-                "none defined (add [input.actions] to shin.toml)".to_string()
-            } else {
-                names.join(", ")
-            }
-        )
-        .into()
-    })
+    if snapshot.contains_key(name) {
+        return Ok(());
+    }
+    let names: Vec<&str> = snapshot.keys().map(String::as_str).collect();
+    let defined = if names.is_empty() {
+        "none defined (add [input.actions] to shin.toml)".to_string()
+    } else {
+        names.join(", ")
+    };
+    Err(format!("unknown action `{name}`; actions: {defined}").into())
 }
 
 #[cfg(test)]

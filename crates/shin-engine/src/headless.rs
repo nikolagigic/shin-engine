@@ -29,7 +29,7 @@ use crate::physics::{PhysicsWorld, physics_system};
 use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
 use crate::scene;
-use crate::script::script_system;
+use crate::script::{self, script_system};
 use crate::stats::{FrameStats, frame_stats_system};
 
 pub use play::{PlaySnapshot, PlayState, register_tools};
@@ -272,7 +272,8 @@ impl Headless {
     /// [`ecs::fixed_step`]). After each step the [`Actions`] resource's
     /// `just_pressed` edges are cleared ([`Actions::end_step`]), and on a
     /// multiplayer client the snapshot that step made due is applied
-    /// ([`net::apply_pending`]; a failure is logged).
+    /// ([`net::apply_pending`]), and the entities scripts spawned or
+    /// despawned are ([`script::apply_commands`]); failures are logged.
     pub fn step(&mut self, n: u32) {
         for _ in 0..n {
             ecs::fixed_step(
@@ -290,6 +291,11 @@ impl Headless {
                 &self.gpu.device,
                 &self.gpu.queue,
             ) {
+                log::error!("{err:#}");
+            }
+            if let Err(err) =
+                script::apply_commands(&mut self.world, &mut self.resources, &self.gpu.device)
+            {
                 log::error!("{err:#}");
             }
         }

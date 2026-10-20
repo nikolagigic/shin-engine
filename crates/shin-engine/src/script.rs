@@ -16,7 +16,7 @@
 //! same fields in world space, read-only); `dt` is the fixed step in
 //! seconds; `time()` is the simulated seconds since play started. Changes
 //! to `entity.transform` are written back to the entity after the call.
-//! Scripts cannot spawn entities or call each other.
+//! Scripts cannot call each other.
 //!
 //! Only `update` (and the functions it calls) runs; statements outside
 //! functions do not. Rhai functions cannot see outer variables, so keep
@@ -33,8 +33,9 @@
 //!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
 //!   `quat * quat`, `quat * vec3`.
 //! - `Transform`: fields `translation`, `rotation`, `scale`.
-//! - `Entity`: fields `id` and `name` (read-only), `transform` (local to
-//!   the parent, written back), and `world_transform` (read-only).
+//! - `Entity`: fields `id`, `name`, and `owner` (the owning player's id,
+//!   `0` if none; read-only), `transform` (local to the parent, written
+//!   back), and `world_transform` (read-only).
 //! - `time()`: simulated seconds since play started.
 //! - `action_pressed(name)`, `action_just_pressed(name)`,
 //!   `action_axis(name)`: the input actions bound in `shin.toml` (see
@@ -45,6 +46,24 @@
 //!   path)` plays it at the entity, so it fades with the distance from the
 //!   camera and follows the entity (GE-036). Sounds queued during a step
 //!   start after every script has run.
+//! - Multiplayer (GE-044): `player_input(id, name)` and
+//!   `player_input_pressed(id, name)` read player `id`'s actions on the
+//!   server; `spawn()` queues a new entity, set up by chaining `name`,
+//!   `mesh`, `color(r, g, b)`, `at(vec3)`, `script`, `replicated(bool)`,
+//!   and `owner(id)`; `despawn_owned(id)` removes everything player `id`
+//!   owns. Spawns and despawns happen after the step ([`apply_commands`]).
+//!
+//! # The server script
+//!
+//! [`SERVER_SCRIPT`] (`scripts/server.rhai` under the [`Assets`] root) is
+//! the game's scene-level script: it belongs to no entity and needs no
+//! `update`. While a [`NetServer`] runs (a dedicated or listen server, or
+//! a solo game's [`NetServer::solo`]), [`script_system`] calls its
+//! `on_player_join(id)` once for each player that joins and
+//! `on_player_leave(id)` once for each that leaves, before the entity
+//! scripts run; either function may be left out, and so may the file.
+//! Stopping play ([`crate::headless::Headless::stop`]) forgets who
+//! joined, so the next play greets the players again.
 //!
 //! Numbers are `f64` in scripts and `f32` in the engine; vector setters
 //! also accept integers, so `v.y = 1` works.
@@ -73,10 +92,11 @@
 
 mod bindings;
 mod input;
+mod players;
 mod tools;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -84,6 +104,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rhai::{AST, CallFnOptions, Dynamic, Engine, Scope};
 
+pub use players::apply_commands;
 pub use tools::register_tools;
 
 use crate::asset::{AssetSource, Assets};
@@ -92,13 +113,25 @@ use crate::ecs::{Entity, Name, Resources, Time, World};
 use crate::headless::PlayState;
 use crate::input::Actions;
 use crate::math::Transform;
-use crate::net::RemoteEntity;
+use crate::net::{NetServer, Owner, PlayerId, PlayerInputs, RemoteEntity};
 use bindings::{ScriptEntity, ScriptTransform, SoundQueue, SoundRequest};
 use input::ActionSnapshot;
+use players::{CommandQueue, InputSnapshot};
 
 /// The function every script defines; [`script_system`] calls it as
 /// `update(entity, dt)`.
 pub const UPDATE_FN: &str = "update";
+
+/// The server script, relative to the [`Assets`] root: where
+/// [`script_system`] looks for the player hooks (see the
+/// [module docs](self#the-server-script)).
+pub const SERVER_SCRIPT: &str = "scripts/server.rhai";
+
+/// Called in the [`SERVER_SCRIPT`] as `on_player_join(id)`.
+pub const JOIN_FN: &str = "on_player_join";
+
+/// Called in the [`SERVER_SCRIPT`] as `on_player_leave(id)`.
+pub const LEAVE_FN: &str = "on_player_leave";
 
 /// How often [`script_system`] checks script files for changes.
 /// Half a second, so an edit takes effect within one second.
@@ -147,10 +180,21 @@ impl fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
+/// What a script is for, which decides what it must define.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Attached to entities: must define `update(entity, dt)`.
+    Entity,
+    /// The [`SERVER_SCRIPT`]: defines hooks, all optional.
+    Server,
+}
+
 /// One script file as last loaded.
 struct Loaded {
     /// The resolved file path.
     file: PathBuf,
+    /// What it is for.
+    kind: Kind,
     /// The last version that compiled, if any.
     ast: Option<AST>,
     /// The file's modification time when it was last read.
@@ -166,6 +210,13 @@ pub struct ScriptEngine {
     sounds: SoundQueue,
     /// What the `action_*` functions read; set before each batch of calls.
     actions: ActionSnapshot,
+    /// What the `player_input*` functions read; set before each batch.
+    inputs: InputSnapshot,
+    /// Spawns and despawns scripts asked for, until [`apply_commands`].
+    commands: CommandQueue,
+    /// The players the server script has greeted with `on_player_join`
+    /// and not yet seen leave.
+    joined: BTreeSet<PlayerId>,
     /// Loaded scripts by path as written in [`Script`].
     scripts: HashMap<PathBuf, Loaded>,
     /// The latest error of each script, by path as written.
@@ -197,11 +248,22 @@ impl ScriptEngine {
         bindings::register(&mut engine, Rc::clone(&clock), Rc::clone(&sounds));
         let actions = ActionSnapshot::default();
         input::register(&mut engine, Rc::clone(&actions));
+        let inputs = InputSnapshot::default();
+        let commands = CommandQueue::default();
+        players::register(
+            &mut engine,
+            Rc::clone(&actions),
+            Rc::clone(&inputs),
+            Rc::clone(&commands),
+        );
         Self {
             engine,
             clock,
             sounds,
             actions,
+            inputs,
+            commands,
+            joined: BTreeSet::new(),
             scripts: HashMap::new(),
             errors: BTreeMap::new(),
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -230,6 +292,11 @@ impl ScriptEngine {
     /// returned; the last version that compiled (if any) stays loaded. On
     /// success the script's recorded error is cleared.
     pub fn load(&mut self, path: &Path, base: &Path) -> Result<(), ScriptError> {
+        self.load_kind(path, base, Kind::Entity)
+    }
+
+    /// [`Self::load`] for a script of `kind`.
+    fn load_kind(&mut self, path: &Path, base: &Path, kind: Kind) -> Result<(), ScriptError> {
         let file = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -242,7 +309,7 @@ impl ScriptEngine {
                 line: None,
                 message: format!("cannot read {}: {err}", file.display()),
             })
-            .and_then(|source| self.compile(path, &source));
+            .and_then(|source| self.compile(path, &source, kind));
         let previous = self.scripts.remove(path).and_then(|loaded| loaded.ast);
         let (ast, result) = match compiled {
             Ok(ast) => {
@@ -258,6 +325,7 @@ impl ScriptEngine {
             path.to_path_buf(),
             Loaded {
                 file,
+                kind,
                 ast,
                 modified,
             },
@@ -265,8 +333,9 @@ impl ScriptEngine {
         result
     }
 
-    /// Compiles `source` and checks it defines `fn update(entity, dt)`.
-    fn compile(&self, path: &Path, source: &str) -> Result<AST, ScriptError> {
+    /// Compiles `source` and checks that an entity script defines
+    /// `fn update(entity, dt)`.
+    fn compile(&self, path: &Path, source: &str, kind: Kind) -> Result<AST, ScriptError> {
         let mut ast = self.engine.compile(source).map_err(|err| ScriptError {
             path: path.to_path_buf(),
             line: err.position().line(),
@@ -275,7 +344,7 @@ impl ScriptEngine {
         let has_update = ast
             .iter_functions()
             .any(|f| f.name == UPDATE_FN && f.params.len() == 2);
-        if !has_update {
+        if kind == Kind::Entity && !has_update {
             return Err(ScriptError {
                 path: path.to_path_buf(),
                 line: None,
@@ -298,18 +367,20 @@ impl ScriptEngine {
             return Vec::new();
         }
         self.last_poll = Some(now);
-        let changed: Vec<PathBuf> = self
+        let changed: Vec<(PathBuf, Kind)> = self
             .scripts
             .iter()
             .filter(|(_, loaded)| modified(&loaded.file) != loaded.modified)
-            .map(|(path, _)| path.clone())
+            .map(|(path, loaded)| (path.clone(), loaded.kind))
             .collect();
-        for path in &changed {
-            if self.load(path, base).is_ok() {
+        let mut reloaded = Vec::with_capacity(changed.len());
+        for (path, kind) in changed {
+            if self.load_kind(&path, base, kind).is_ok() {
                 log::info!("reloaded script {}", path.display());
             }
+            reloaded.push(path);
         }
-        changed
+        reloaded
     }
 
     /// Evaluates `source` as a standalone script (the same API as entity
@@ -371,6 +442,74 @@ impl ScriptEngine {
         }
     }
 
+    /// Greets players with the [`SERVER_SCRIPT`]'s hooks: `on_player_leave`
+    /// for each greeted player not in `players`, then `on_player_join` for
+    /// each player in `players` not greeted yet, in id order. Each player
+    /// is greeted once and seen off once, even if the script is missing or
+    /// fails.
+    fn greet_players(&mut self, players: &[PlayerId], base: &Path) {
+        let current: BTreeSet<PlayerId> = players.iter().copied().collect();
+        let left: Vec<PlayerId> = self.joined.difference(&current).copied().collect();
+        let joined: Vec<PlayerId> = current.difference(&self.joined).copied().collect();
+        if left.is_empty() && joined.is_empty() {
+            return;
+        }
+        self.joined = current;
+        let path = Path::new(SERVER_SCRIPT);
+        if !self.scripts.contains_key(path) {
+            if !base.join(path).exists() {
+                log::debug!("no {SERVER_SCRIPT}; players join and leave unannounced");
+                return;
+            }
+            // The error, if any, is logged and recorded by `load_kind`.
+            let _ = self.load_kind(path, base, Kind::Server);
+        }
+        let calls = left
+            .into_iter()
+            .map(|player| (LEAVE_FN, player))
+            .chain(joined.into_iter().map(|player| (JOIN_FN, player)));
+        for (hook, player) in calls {
+            self.call_hook(path, hook, player);
+        }
+    }
+
+    /// Calls `hook(id)` in the loaded script at `path`, if it defines it.
+    fn call_hook(&mut self, path: &Path, hook: &str, player: PlayerId) {
+        let Some(ast) = self
+            .scripts
+            .get(path)
+            .and_then(|loaded| loaded.ast.as_ref())
+        else {
+            return;
+        };
+        if !ast
+            .iter_functions()
+            .any(|f| f.name == hook && f.params.len() == 1)
+        {
+            return;
+        }
+        let options = CallFnOptions::new().eval_ast(false).rewind_scope(true);
+        let id = rhai::INT::from(player.0);
+        let result = self.engine.call_fn_with_options::<Dynamic>(
+            options,
+            &mut Scope::new(),
+            ast,
+            hook,
+            (id,),
+        );
+        if let Err(err) = result {
+            self.record(runtime_error(path, &err));
+        }
+    }
+
+    /// Forgets which players joined and drops queued spawns and despawns:
+    /// what stopping play does, since the world goes back to before
+    /// anyone joined.
+    pub(crate) fn reset_session(&mut self) {
+        self.joined.clear();
+        self.commands.borrow_mut().clear();
+    }
+
     /// Stores `err` as its script's latest error, logging it unless it is
     /// the same error as last time (a failing script fails every step).
     fn record(&mut self, err: ScriptError) {
@@ -397,11 +536,13 @@ fn modified(file: &Path) -> Option<SystemTime> {
     std::fs::metadata(file).and_then(|m| m.modified()).ok()
 }
 
-/// Fixed system: runs `update(entity, dt)` for every entity with a
-/// [`Script`] and a [`Transform`], in entity id order, writes each
-/// script's transform back, then plays the sounds the scripts asked for
-/// (`play_sound`, `play_sound_at`); a sound that cannot be played is
-/// logged.
+/// Fixed system: while a [`NetServer`] runs, first calls the
+/// [`SERVER_SCRIPT`]'s `on_player_leave` and `on_player_join` for players
+/// who left or joined since the last run. Then runs `update(entity, dt)`
+/// for every entity with a [`Script`] and a [`Transform`], in entity id
+/// order, writes each script's transform back, then plays the sounds the
+/// scripts asked for (`play_sound`, `play_sound_at`); a sound that cannot
+/// be played is logged. Spawns and despawns wait for [`apply_commands`].
 ///
 /// Does nothing while editing or paused (see the [module docs](self)).
 /// Inserts a [`ScriptEngine`] if there is none, and first reloads scripts
@@ -416,16 +557,18 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
         }) => time.elapsed - snapshot.time().elapsed,
         Some(_) => return,
     };
-    let mut scripted: Vec<(Entity, PathBuf, Transform, String)> = world
-        .query::<(Entity, &Script, &Transform, Option<&Name>)>()
+    let players = res.get::<NetServer>().map(NetServer::players);
+    let mut scripted: Vec<(Entity, PathBuf, Transform, String, rhai::INT)> = world
+        .query::<(Entity, &Script, &Transform, Option<&Name>, Option<&Owner>)>()
         .without::<&RemoteEntity>()
         .iter()
-        .map(|(entity, script, transform, name)| {
+        .map(|(entity, script, transform, name, owner)| {
             let name = name.map(|n| n.0.clone()).unwrap_or_default();
-            (entity, script.path.clone(), *transform, name)
+            let owner = owner.map_or(0, |o| rhai::INT::from(o.0.0));
+            (entity, script.path.clone(), *transform, name, owner)
         })
         .collect();
-    if scripted.is_empty() {
+    if scripted.is_empty() && players.is_none() {
         return;
     }
     scripted.sort_by_key(|(entity, ..)| entity.to_bits());
@@ -437,6 +580,7 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
 
     let base = script_base(res);
     let actions = input::snapshot(res.get::<Actions>());
+    let inputs = res.get::<PlayerInputs>().cloned().unwrap_or_default();
     if res.get::<ScriptEngine>().is_none() {
         res.insert(ScriptEngine::new());
     }
@@ -444,10 +588,15 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
     scripts.reload_changed(&base);
     scripts.clock.set(t);
     *scripts.actions.borrow_mut() = actions;
-    for ((entity, path, transform, name), world_space) in scripted.into_iter().zip(worlds) {
+    *scripts.inputs.borrow_mut() = inputs;
+    if let Some(players) = players {
+        scripts.greet_players(&players, &base);
+    }
+    for ((entity, path, transform, name, owner), world_space) in scripted.into_iter().zip(worlds) {
         let handle = ScriptEntity {
             id: entity.to_bits().get() as rhai::INT,
             name,
+            owner,
             transform: ScriptTransform(Rc::new(RefCell::new(transform))),
             world: world_space,
         };
