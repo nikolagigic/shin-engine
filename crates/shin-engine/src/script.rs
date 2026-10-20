@@ -65,6 +65,9 @@
 //! and the editor's inspector. A script that no longer compiles keeps
 //! running its last good version.
 //!
+//! On a multiplayer client, scripts on entities replicated from the
+//! server ([`RemoteEntity`]) do not run: the server runs them.
+//!
 //! Tools: [`register_tools`] adds `script.attach`, `script.eval`, and
 //! `script.errors`.
 
@@ -89,6 +92,7 @@ use crate::ecs::{Entity, Name, Resources, Time, World};
 use crate::headless::PlayState;
 use crate::input::Actions;
 use crate::math::Transform;
+use crate::net::RemoteEntity;
 use bindings::{ScriptEntity, ScriptTransform, SoundQueue, SoundRequest};
 use input::ActionSnapshot;
 
@@ -414,6 +418,7 @@ pub fn script_system(world: &mut World, res: &mut Resources) {
     };
     let mut scripted: Vec<(Entity, PathBuf, Transform, String)> = world
         .query::<(Entity, &Script, &Transform, Option<&Name>)>()
+        .without::<&RemoteEntity>()
         .iter()
         .map(|(entity, script, transform, name)| {
             let name = name.map(|n| n.0.clone()).unwrap_or_default();
