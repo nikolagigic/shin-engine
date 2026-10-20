@@ -22,6 +22,10 @@
 //! - [`players`]: players and their input (GE-044): [`InputFrame`]s from
 //!   clients become the server's [`PlayerInputs`]; a client knows itself
 //!   as [`LocalPlayer`].
+//! - [`predict`]: local-player prediction and reconciliation (GE-048):
+//!   the local player's own [`Mover`](crate::physics::Mover)s are
+//!   [`Predicted`], moved at once with its input, and corrected by the
+//!   server's snapshots ([`Snapshot::last_input_ticks`]).
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
 //!   [`LoopbackTransport`], an in-process implementation for tests, with
 //!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
@@ -30,6 +34,7 @@
 
 pub mod client;
 pub mod players;
+pub mod predict;
 pub mod protocol;
 pub mod server;
 pub mod snapshot;
@@ -48,6 +53,7 @@ pub use client::{
     net_interpolate_system,
 };
 pub use players::{LocalPlayer, PlayerInputs};
+pub use predict::{InputHistory, Predicted};
 pub use protocol::{
     EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
 };

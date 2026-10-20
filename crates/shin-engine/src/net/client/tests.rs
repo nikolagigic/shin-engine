@@ -45,6 +45,7 @@ impl FakeServer {
             tick,
             entities: entities.iter().map(|&(id, x)| at(id, x)).collect(),
             removed: removed.iter().copied().map(NetId).collect(),
+            last_input_ticks: Vec::new(),
         }));
     }
 }
@@ -60,6 +61,7 @@ fn at(id: u64, x: f32) -> EntitySnap {
         color: Some([1.0, 0.5, 0.25, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
