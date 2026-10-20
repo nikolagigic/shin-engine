@@ -1,5 +1,5 @@
-//! Network tools: `net.status`. GE-046 adds hosting and joining; until
-//! then the engine is a server only when code inserts a [`NetServer`].
+//! Network tools: `net.status`. GE-046 adds hosting and joining tools;
+//! until then the engine is a server when the game inserts a [`NetServer`].
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -14,7 +14,8 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "net.status",
         "Reports this engine's multiplayer role. { role: \"none\" } when it is \
-         not networked. A server reports { role: \"server\", tick, players, \
+         not networked (playing solo, as under --mcp, included). A server \
+         (--serve or --host) reports { role: \"server\", tick, players, \
          bandwidth: { full_bytes_per_s, sent_bytes_per_s, compression_ratio } }: \
          snapshot bytes per second to all remote players over the last second, \
          as full snapshots would cost (before) and as actually sent with deltas \
@@ -29,7 +30,13 @@ pub fn register_tools(reg: &mut ToolRegistry) {
 struct NoArgs {}
 
 fn net_status(engine: &mut Headless, _: NoArgs) -> anyhow::Result<ToolOutput> {
-    let Some(server) = engine.resources.get::<NetServer>() else {
+    // A solo game (`NetServer::solo`, as under `--mcp`) runs the server's
+    // logic but nobody can join it: not networked.
+    let Some(server) = engine
+        .resources
+        .get::<NetServer>()
+        .filter(|server| !server.is_solo())
+    else {
         return Ok(ToolOutput::Json(json!({ "role": "none" })));
     };
     let bandwidth = server.bandwidth();
@@ -69,6 +76,9 @@ mod tests {
         let reg = ToolRegistry::with_engine_tools();
         assert!(reg.list().iter().any(|tool| tool.name == "net.status"));
         let mut engine = Headless::new(8, 8)?;
+        assert_eq!(status(&reg, &mut engine)?, json!({ "role": "none" }));
+        // A solo game (as under `--mcp`) is not networked either.
+        engine.resources.insert(NetServer::solo());
         assert_eq!(status(&reg, &mut engine)?, json!({ "role": "none" }));
         assert!(
             reg.call(&mut engine, "net.status", json!({ "x": 1 }))

@@ -417,6 +417,6 @@ Casts a ray from `origin` along `dir` (need not be normalised) up to `max` metre
 
 ## `net.status`
 
-Reports this engine's multiplayer role. { role: "none" } when it is not networked. A server reports { role: "server", tick, players, bandwidth: { full_bytes_per_s, sent_bytes_per_s, compression_ratio } }: snapshot bytes per second to all remote players over the last second, as full snapshots would cost (before) and as actually sent with deltas (after), and their ratio (null while nothing was sent).
+Reports this engine's multiplayer role. { role: "none" } when it is not networked (playing solo, as under --mcp, included). A server (--serve or --host) reports { role: "server", tick, players, bandwidth: { full_bytes_per_s, sent_bytes_per_s, compression_ratio } }: snapshot bytes per second to all remote players over the last second, as full snapshots would cost (before) and as actually sent with deltas (after), and their ratio (null while nothing was sent).
 
 Takes no arguments.

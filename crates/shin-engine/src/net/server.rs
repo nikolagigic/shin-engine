@@ -83,6 +83,8 @@ pub struct NetServer {
     frames: Vec<(PlayerId, InputFrame)>,
     /// Whether this tick's input half has run.
     received: bool,
+    /// Made by [`Self::solo`]: nobody can join.
+    solo: bool,
 }
 
 /// One remote player's delta state.
@@ -166,6 +168,7 @@ impl NetServer {
             traffic: Traffic::default(),
             frames: Vec::new(),
             received: false,
+            solo: false,
         }
     }
 
@@ -178,7 +181,13 @@ impl NetServer {
         let (transport, _) = LoopbackTransport::pair(0);
         let mut server = Self::new(Box::new(transport), ServerOptions::default().snapshot_every);
         server.add_local_player();
+        server.solo = true;
         server
+    }
+
+    /// Whether this is a [`Self::solo`] server, which nobody can join.
+    pub fn is_solo(&self) -> bool {
+        self.solo
     }
 
     /// Adds the host's own player on a listen server and returns its id
