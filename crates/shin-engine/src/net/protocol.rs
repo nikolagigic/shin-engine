@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{NetId, PlayerId};
 use crate::input::ActionValue;
+use crate::physics::Mover;
 use crate::scene::TransformDesc;
 
 /// The wire-format version. Bump it whenever [`Message`] or anything it
 /// contains changes shape, since postcard is not self-describing.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Everything a server and a client send each other.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,6 +61,11 @@ pub struct Snapshot {
     /// Entities that stopped being replicated (despawned, or lost
     /// [`super::Replicated`]) since the previous capture.
     pub removed: Vec<NetId>,
+    /// For each player whose input the server has received, in player
+    /// order: the tick of the newest [`InputFrame`] applied when this
+    /// snapshot was captured (GE-048). A client predicting its own player
+    /// replays only its input newer than this.
+    pub last_input_ticks: Vec<(PlayerId, u64)>,
 }
 
 /// One replicated entity: a flat subset of [`crate::scene::EntityDesc`],
@@ -83,6 +89,8 @@ pub struct EntitySnap {
     pub texture: Option<String>,
     /// The player who controls it ([`super::Owner`]).
     pub owner: Option<PlayerId>,
+    /// Its [`Mover`], state included, if it walks (GE-048).
+    pub mover: Option<Mover>,
 }
 
 /// A player's input for one client tick (GE-044): the client's
@@ -151,6 +159,10 @@ mod tests {
                     color: Some([0.8, 0.1, 0.1, 1.0]),
                     texture: Some("assets/checker.png".into()),
                     owner: Some(PlayerId(3)),
+                    mover: Some(Mover {
+                        vertical_velocity: -1.5,
+                        ..Mover::new(3.0, 5.0)
+                    }),
                 },
                 EntitySnap {
                     id: NetId(2),
@@ -161,9 +173,11 @@ mod tests {
                     color: None,
                     texture: None,
                     owner: None,
+                    mover: None,
                 },
             ],
             removed: vec![NetId(7), NetId(u64::MAX)],
+            last_input_ticks: vec![(PlayerId(1), 0), (PlayerId(3), u64::MAX)],
         }
     }
 

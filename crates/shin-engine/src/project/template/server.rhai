@@ -7,9 +7,10 @@
 // client that joins with `--join` never runs it; it sees what the server
 // spawns.
 //
-// Each player gets a cube of their own, driven by scripts/player.rhai
-// with that player's input. Edit this file while the game runs and it
-// reloads within a second; players already in keep their cubes.
+// Each player gets a cube of their own that walks with that player's
+// input (a mover) and follows the rules in scripts/player.rhai. Edit
+// this file while the game runs and it reloads within a second; players
+// already in keep their cubes.
 
 fn on_player_join(id) {
     let c = colour(id);
@@ -18,9 +19,10 @@ fn on_player_join(id) {
         .mesh("assets/cube.gltf")
         .color(c[0], c[1], c[2])
         .at(spot(id))
+        .mover(3.0, 5.0)    // walks at 3 m/s, jumps at 5 m/s with its owner's input
         .script("scripts/player.rhai")
         .replicated(true)   // sent to every client
-        .owner(id);         // player_input(entity.owner, ...) reads this player
+        .owner(id);         // whose input moves it, and who predicts it
 }
 
 fn on_player_leave(id) {

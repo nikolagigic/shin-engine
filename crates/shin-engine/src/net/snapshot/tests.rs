@@ -32,6 +32,7 @@ fn snap(id: u64, parent: Option<u64>, x: f32, mesh: Option<&str>) -> EntitySnap 
         color: mesh.map(|_| [0.5, 0.25, 1.0, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
@@ -178,6 +179,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
             snap(6, Some(5), 2.0, None),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &first)?;
     let (root, child) = (
@@ -210,6 +212,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
         tick: 3,
         entities: vec![snap(7, None, 0.0, None)],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &other)?;
     assert_eq!(client.world.len(), 3);
@@ -229,6 +232,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
             snap(4, None, 0.0, None),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &snapshot)?;
     assert_eq!(client.world.len(), 4);
@@ -237,6 +241,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
         tick: 2,
         entities: vec![],
         removed: vec![NetId(1), NetId(99)],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &remove)?;
     assert_eq!(
@@ -263,6 +268,7 @@ fn applying_the_same_snapshot_twice_changes_nothing() -> anyhow::Result<()> {
             snap(1, None, 1.0, Some("builtin://cube")),
         ],
         removed: vec![NetId(50)],
+        last_input_ticks: Vec::new(),
     };
     let reg = ToolRegistry::with_engine_tools();
     apply_to(&mut client, &snapshot)?;
@@ -301,6 +307,7 @@ fn a_mesh_that_does_not_load_fails_and_changes_nothing() -> anyhow::Result<()> {
             snap(2, None, 0.0, Some("builtin://teapot")),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     let err = apply_to(&mut client, &snapshot).unwrap_err();
     assert!(format!("{err:#}").contains("builtin://teapot"), "{err:#}");

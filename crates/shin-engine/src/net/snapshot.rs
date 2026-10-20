@@ -3,8 +3,9 @@
 //!
 //! What is replicated per entity: its [`NetId`], parent link, [`Name`],
 //! [`Transform`], mesh, colour, and texture (by [`AssetSource`] string),
-//! and [`Owner`]. Scripts, sounds, and physics are not: they run on the
-//! server, and clients see their effect through the transforms.
+//! [`Owner`], and [`Mover`] (so a client can predict its own player,
+//! GE-048). Scripts, sounds, and physics are not: they run on the server,
+//! and clients see their effect through the transforms.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use crate::ecs::{
     world_transform,
 };
 use crate::math::Transform;
+use crate::physics::Mover;
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::scene::TransformDesc;
 
@@ -94,6 +96,7 @@ fn capture_with(
                 color,
                 texture,
                 owner: world.get::<&Owner>(entity).ok().map(|o| o.0),
+                mover: world.get::<&Mover>(entity).ok().map(|m| *m),
             }
         })
         .collect();
@@ -102,6 +105,7 @@ fn capture_with(
         tick,
         entities,
         removed,
+        last_input_ticks: Vec::new(),
     }
 }
 
@@ -232,6 +236,7 @@ fn apply_with(
         set(world, entity, Some(desc.transform.to_transform()))?;
         set(world, entity, desc.name.clone().map(Name))?;
         set(world, entity, desc.owner.map(Owner))?;
+        set(world, entity, desc.mover)?;
         let instance = draw.map(|(mesh, color, texture)| MeshInstance {
             mesh,
             color,

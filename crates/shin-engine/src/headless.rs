@@ -25,7 +25,7 @@ use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::input::Actions;
 use crate::math::{Camera, Projection, Transform, Vec3};
 use crate::net;
-use crate::physics::{PhysicsWorld, physics_system};
+use crate::physics::{PhysicsWorld, mover_system, physics_system};
 use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
 use crate::scene;
@@ -392,14 +392,15 @@ fn check_size((width, height): (u32, u32)) -> anyhow::Result<()> {
 }
 
 /// The schedule [`Headless::new`] starts with: [`frame_stats_system`] and
-/// [`audio_system`] per frame, and per fixed step [`script_system`] then
-/// [`physics_system`] (so kinematic bodies follow what scripts did in the
-/// same step).
+/// [`audio_system`] per frame, and per fixed step [`script_system`],
+/// [`mover_system`] (players walk, GE-048), then [`physics_system`] (so
+/// kinematic bodies follow what scripts did in the same step).
 fn default_schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_frame("frame_stats", frame_stats_system);
     schedule.add_frame("audio", audio_system);
     schedule.add_fixed("script", script_system);
+    schedule.add_fixed("mover", mover_system);
     schedule.add_fixed("physics", physics_system);
     schedule
 }

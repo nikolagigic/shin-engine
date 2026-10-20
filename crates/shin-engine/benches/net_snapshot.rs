@@ -39,6 +39,7 @@ fn snapshot(count: u64) -> Snapshot {
                 color: Some([0.55, 0.38, 0.2, 1.0]),
                 texture: None,
                 owner: None,
+                mover: None,
             }
         })
         .collect();
@@ -46,6 +47,7 @@ fn snapshot(count: u64) -> Snapshot {
         tick: 123_456,
         entities,
         removed: Vec::new(),
+        last_input_ticks: Vec::new(),
     }
 }
 

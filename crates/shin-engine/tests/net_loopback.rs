@@ -102,6 +102,11 @@ fn server(
 /// The client: the same project open (its camera, light, and assets) but
 /// with no entities of its own, a [`NetClient`] on `transport` with an
 /// interpolation delay of `delay` ticks, and playing.
+///
+/// Prediction (GE-048) is off: these tests compare replication, and with
+/// no entities of its own the client has no ground for its predicted
+/// cube to land on (the server replicates the ground's transform, not its
+/// collider). `net::predict`'s tests cover prediction.
 fn client(
     project: &StarterProject,
     transport: LoopbackTransport,
@@ -114,9 +119,9 @@ fn client(
     engine
         .schedule
         .add_frame("net_interpolate", net_interpolate_system);
-    engine
-        .resources
-        .insert(NetClient::with_delay(Box::new(transport), "ada", delay));
+    let mut net = NetClient::with_delay(Box::new(transport), "ada", delay);
+    net.set_prediction(false);
+    engine.resources.insert(net);
     engine.play()?;
     Ok(engine)
 }

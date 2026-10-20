@@ -259,8 +259,9 @@ pub fn net_server_input_system(_: &mut World, res: &mut Resources) {
 ///
 /// Runs [`net_server_input_system`] first if that has not run this tick,
 /// then on ticks divisible by `snapshot_every` captures the replicated
-/// world ([`capture`], at the server's tick) and sends it to every remote
-/// player, then advances the tick.
+/// world ([`capture`], at the server's tick), adds each player's last
+/// input tick from [`PlayerInputs`] ([`Snapshot::last_input_ticks`]), and
+/// sends it to every remote player, then advances the tick.
 pub fn net_server_system(world: &mut World, res: &mut Resources) {
     let Some(server) = res.get::<NetServer>() else {
         return;
@@ -272,7 +273,11 @@ pub fn net_server_system(world: &mut World, res: &mut Resources) {
     server.received = false;
     let tick = server.tick;
     if server.snapshot_due() {
-        let snapshot = capture(world, res, tick);
+        let mut snapshot = capture(world, res, tick);
+        snapshot.last_input_ticks = res
+            .get::<PlayerInputs>()
+            .map(PlayerInputs::last_input_ticks)
+            .unwrap_or_default();
         res.expect_mut::<NetServer>().send_snapshot(snapshot);
     }
     res.expect_mut::<NetServer>().tick += 1;
