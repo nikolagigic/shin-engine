@@ -99,9 +99,8 @@ Shin is built on five rules. They describe the code as it is, not a wish list.
    compete, the readable one wins, because the people and agents working
    here should be able to hold the whole engine in their head.
 
-Deliberately missing for now, with ECS-shaped answers when needed: scene
-hierarchy, an event system, a parallel schedule, and more than one lit
-pipeline.
+Deliberately missing for now, with ECS-shaped answers when needed: an
+event system, a parallel schedule, and more than one lit pipeline.
 
 ## Status
 
