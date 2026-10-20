@@ -29,7 +29,8 @@ game's `game.*` tools. Edits made through tools are undoable with
 `history.undo`. Check visual work with `render.frame`.
 
 Skills for common tasks are in `.claude/skills/`: `shin-scene-building`,
-`shin-visual-debugging`, `shin-scripting`, and `shin-project`.
+`shin-visual-debugging`, `shin-scripting`, `shin-project`, and
+`shin-multiplayer`.
 
 ## Where things live
 

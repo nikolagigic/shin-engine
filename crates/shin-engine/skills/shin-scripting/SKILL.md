@@ -106,18 +106,11 @@ fn on_player_join(id) {
 }
 fn on_player_leave(id) { despawn_owned(id); }
 
-// scripts/player.rhai: server-only rules, not movement
+// scripts/player.rhai: server-only rules; player_input(entity.owner, "move_x") is -1..1
 fn update(entity, dt) {
-    if entity.transform.translation.y < -10.0 {
-        entity.transform.translation = vec3(0.0, 0.5, 2.5);   // fell off: back on
-    }
-    // player_input(entity.owner, "move_x") reads the owner's axis, -1..1
+    if entity.transform.translation.y < -10.0 { entity.transform.translation = vec3(0.0, 0.5, 2.5); }
 }
 ```
-
-Steer players with `.mover(speed, jump_impulse)`, not by setting the
-transform in a script: a mover is predicted on its owner's client and
-responds at once; script movement arrives a round trip late.
 
 To test solo: `sim.play`, `sim.step` with `{"steps": 1}` (the join
 spawns the cube), `input.set` with `{"action": "move_x", "axis": 1.0}`,
@@ -151,7 +144,5 @@ transform before and after the steps.
   `despawn_owned` take effect after the step; look one step later.
 - **`action_axis` in a player's script** reads the local keyboard, not
   that player's; use `player_input(entity.owner, ...)`.
-- **A player's cube lags or jumps back over the network**: it is moved by
-  a script (not predicted) or its client has no ground (a mover lands on
-  the client's own static colliders). Use `.mover(...)` and load the
-  same scene on both sides.
+- **Player movement**: steer with `.mover(...)`, not the transform; see
+  `shin-multiplayer`.

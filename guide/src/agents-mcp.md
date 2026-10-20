@@ -142,7 +142,7 @@ server itself.
 
 - **Prompts.** `prompts/list` returns one prompt per skill
   (`shin-scene-building`, `shin-visual-debugging`, `shin-scripting`,
-  `shin-project`) with its description and one optional argument, `goal`.
+  `shin-project`, `shin-multiplayer`) with its description and one optional argument, `goal`.
   `prompts/get` returns the skill's Markdown as a single user message,
   followed by a `## Your goal` section when `goal` is given. Claude Code
   shows MCP prompts as slash commands, e.g.
