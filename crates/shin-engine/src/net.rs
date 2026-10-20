@@ -8,10 +8,11 @@
 //!   live only for the session, and are never reused; scene files do not
 //!   store them.
 //! - [`protocol`]: the [`Message`]s peers exchange and their binary codec,
-//!   [`encode`] and [`decode`] (postcard), checked by [`PROTOCOL_VERSION`].
+//!   [`encode`] and [`decode`] (postcard), checked by [`PROTOCOL_VERSION`];
+//!   transforms travel as [`NetTransform`]s, rotations packed in 7 bytes.
 //! - [`snapshot`]: [`capture`] turns the replicated entities into a
 //!   [`Snapshot`]; [`apply`] spawns, updates, and despawns entities from
-//!   one.
+//!   one; [`diff`] and [`patch`] make and undo deltas (GE-049).
 //! - [`server`]: the authority (GE-041): [`NetServer`],
 //!   [`net_server_input_system`] and [`net_server_system`] (the two
 //!   halves of a tick), and [`run_server`] for a dedicated server.
@@ -49,12 +50,13 @@ pub use client::{
 };
 pub use players::{LocalPlayer, PlayerInputs};
 pub use protocol::{
-    EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
+    EntitySnap, InputFrame, Message, NetTransform, PROTOCOL_VERSION, Snapshot, decode, encode,
+    reject_version,
 };
 pub use server::{
-    NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
+    Bandwidth, NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
 };
-pub use snapshot::{apply, capture};
+pub use snapshot::{apply, capture, diff, patch};
 pub use tools::register_tools;
 pub use transport::{Channel, Event, LoopbackOptions, LoopbackTransport, PeerId, Transport};
 

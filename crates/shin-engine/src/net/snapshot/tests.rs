@@ -27,7 +27,7 @@ fn snap(id: u64, parent: Option<u64>, x: f32, mesh: Option<&str>) -> EntitySnap 
         id: NetId(id),
         parent: parent.map(NetId),
         name: Some(format!("e{id}")),
-        transform: TransformDesc::from_transform(&at(x)),
+        transform: NetTransform::from_transform(&at(x)),
         mesh: mesh.map(str::to_string),
         color: mesh.map(|_| [0.5, 0.25, 1.0, 1.0]),
         texture: None,
@@ -173,6 +173,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
     let mut client = Headless::new(8, 8)?;
     let mut first = Snapshot {
         tick: 1,
+        baseline: None,
         entities: vec![
             snap(5, None, 1.0, Some("builtin://cube")),
             snap(6, Some(5), 2.0, None),
@@ -208,6 +209,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
     // A snapshot that does not mention an entity leaves it alone.
     let other = Snapshot {
         tick: 3,
+        baseline: None,
         entities: vec![snap(7, None, 0.0, None)],
         removed: vec![],
     };
@@ -222,6 +224,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
     let mut client = Headless::new(8, 8)?;
     let snapshot = Snapshot {
         tick: 1,
+        baseline: None,
         entities: vec![
             snap(1, None, 0.0, Some("builtin://cube")),
             snap(2, Some(1), 0.0, None),
@@ -235,6 +238,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
 
     let remove = Snapshot {
         tick: 2,
+        baseline: None,
         entities: vec![],
         removed: vec![NetId(1), NetId(99)],
     };
@@ -258,6 +262,7 @@ fn applying_the_same_snapshot_twice_changes_nothing() -> anyhow::Result<()> {
     let mut client = Headless::new(8, 8)?;
     let snapshot = Snapshot {
         tick: 1,
+        baseline: None,
         entities: vec![
             snap(3, Some(1), 2.0, None), // listed before its parent
             snap(1, None, 1.0, Some("builtin://cube")),
@@ -296,6 +301,7 @@ fn a_mesh_that_does_not_load_fails_and_changes_nothing() -> anyhow::Result<()> {
     let mut client = Headless::new(8, 8)?;
     let snapshot = Snapshot {
         tick: 1,
+        baseline: None,
         entities: vec![
             snap(1, None, 0.0, Some("builtin://cube")),
             snap(2, None, 0.0, Some("builtin://teapot")),
@@ -363,7 +369,133 @@ fn starter_scene_round_trips_through_a_snapshot() -> anyhow::Result<()> {
     let want = list_without(&reg, &mut server, &ignore);
     let got = list_without(&reg, &mut client, &ignore);
     assert_eq!(got.len(), roots.len());
-    assert_eq!(got, want);
+    // Snapshots pack rotations into 7 bytes (`NetTransform`, within
+    // 0.004°), so rotations are compared by angle; every other field must
+    // match exactly.
+    for (ours, theirs) in got.into_iter().zip(want) {
+        let (mut ours, mut theirs) = (ours, theirs);
+        let angle = rotation_angle_deg(take_rotation(&mut ours), take_rotation(&mut theirs));
+        assert_eq!(ours, theirs);
+        assert!(angle <= 0.01, "{}: off by {angle}°", theirs["name"]);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// Removes `rotation_euler_deg` from an `entity.list` row and returns it.
+fn take_rotation(row: &mut Value) -> [f64; 3] {
+    let rotation = row
+        .as_object_mut()
+        .and_then(|fields| fields.remove("rotation_euler_deg"))
+        .expect("a rotation");
+    [0, 1, 2].map(|i| rotation[i].as_f64().expect("a number"))
+}
+
+/// The angle in degrees between two rotations given as intrinsic XYZ
+/// Euler angles in degrees, in `f64`.
+fn rotation_angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let quat = |[x, y, z]: [f64; 3]| {
+        glam::DQuat::from_euler(
+            glam::EulerRot::XYZ,
+            x.to_radians(),
+            y.to_radians(),
+            z.to_radians(),
+        )
+    };
+    let d = quat(a).inverse() * quat(b);
+    (2.0 * d.xyz().length().atan2(d.w.abs())).to_degrees()
+}
+
+/// A full snapshot at `tick` of `(net id, x)` entities.
+fn full(tick: u64, entities: &[(u64, f32)]) -> Snapshot {
+    Snapshot {
+        tick,
+        baseline: None,
+        entities: entities
+            .iter()
+            .map(|&(id, x)| snap(id, None, x, Some("builtin://cube")))
+            .collect(),
+        removed: Vec::new(),
+    }
+}
+
+#[test]
+fn diff_lists_changed_and_new_entities_and_removals() {
+    let base = full(10, &[(1, 0.0), (2, 1.0), (3, 2.0)]);
+    let now = full(13, &[(1, 0.5), (3, 2.0), (4, 3.0)]);
+    let delta = diff(&base, &now);
+    assert_eq!((delta.tick, delta.baseline), (13, Some(10)));
+    let sent: Vec<u64> = delta.entities.iter().map(|e| e.id.0).collect();
+    assert_eq!(sent, [1, 4], "3 did not change");
+    assert_eq!(delta.removed, [NetId(2)]);
+    assert_eq!(diff(&now, &now).entities, [], "nothing changed");
+}
+
+#[test]
+fn patch_undoes_diff() -> anyhow::Result<()> {
+    let base = full(10, &[(1, 0.0), (2, 1.0), (3, 2.0), (5, 4.0)]);
+    let now = full(13, &[(1, 0.5), (3, 2.0), (4, 3.0), (5, 4.0)]);
+    let delta = diff(&base, &now);
+    let patched = patch(&base, &delta)?;
+    assert_eq!(patched.entities, now.entities);
+    assert_eq!((patched.tick, patched.baseline), (13, None));
+    assert_eq!(patched.removed, [NetId(2)]);
+    // Through the wire too.
+    let wire = crate::net::encode(&crate::net::Message::Snapshot(delta));
+    let crate::net::Message::Snapshot(received) = crate::net::decode(&wire)? else {
+        panic!("expected a snapshot");
+    };
+    assert_eq!(patch(&base, &received)?.entities, now.entities);
+    Ok(())
+}
+
+#[test]
+fn patch_refuses_a_delta_against_another_baseline() {
+    let base = full(10, &[(1, 0.0)]);
+    let delta = diff(&full(9, &[(1, 0.0)]), &full(12, &[(1, 1.0)]));
+    let err = patch(&base, &delta).unwrap_err().to_string();
+    assert!(err.contains("relative to Some(9)"), "{err}");
+    assert!(patch(&base, &full(12, &[])).is_err(), "a full snapshot");
+}
+
+/// GE-049 acceptance: 1000 typical props, 5 % of them moving each tick;
+/// a delta against the previous tick is at least 10 times smaller on the
+/// wire than the full snapshot. The bench (`benches/net_snapshot.rs`)
+/// prints the same comparison.
+#[test]
+fn deltas_are_ten_times_smaller_when_five_percent_move() {
+    let prop = |i: u64, tick: u64| {
+        let moving = i % 20 == 0;
+        let f = i as f32;
+        let slide = if moving { tick as f32 * 0.01 } else { 0.0 };
+        EntitySnap {
+            id: NetId(i + 1),
+            parent: None,
+            name: Some(format!("crate {}", i + 1)),
+            transform: NetTransform::from_transform(&Transform {
+                translation: Vec3::new(f * 0.37 - 20.0 + slide, 0.5, f * -0.23),
+                rotation: glam::Quat::from_rotation_y(0.7 * f),
+                scale: Vec3::splat(0.5),
+            }),
+            mesh: Some("builtin://cube".into()),
+            color: Some([0.55, 0.38, 0.2, 1.0]),
+            texture: None,
+            owner: None,
+        }
+    };
+    let at_tick = |tick| Snapshot {
+        tick,
+        baseline: None,
+        entities: (0..1000).map(|i| prop(i, tick)).collect(),
+        removed: Vec::new(),
+    };
+    let size = |snap: Snapshot| crate::net::encode(&crate::net::Message::Snapshot(snap)).len();
+    let (base, now) = (at_tick(100), at_tick(101));
+    let delta = diff(&base, &now);
+    assert_eq!(delta.entities.len(), 50);
+    let (full_bytes, delta_bytes) = (size(now), size(delta));
+    assert!(
+        full_bytes >= 10 * delta_bytes,
+        "full {full_bytes} bytes, delta {delta_bytes} bytes"
+    );
 }

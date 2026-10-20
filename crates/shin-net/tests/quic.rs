@@ -9,10 +9,9 @@ use std::time::{Duration, Instant};
 use shin::ecs::{Resources, World};
 use shin::math::Transform;
 use shin::net::{
-    Channel, EntitySnap, Event, InputFrame, Message, NetId, NetServer, PROTOCOL_VERSION, PeerId,
-    PlayerId, Replicated, Snapshot, Transport, net_server_system,
+    Channel, EntitySnap, Event, InputFrame, Message, NetId, NetServer, NetTransform,
+    PROTOCOL_VERSION, PeerId, PlayerId, Replicated, Snapshot, Transport, net_server_system,
 };
-use shin::scene::TransformDesc;
 use shin_net::{QuicTransport, ServerTrust};
 
 /// How long any one exchange may take before the test fails.
@@ -175,6 +174,7 @@ fn unreliable_arrivals(from: &mut QuicTransport, to_peer: PeerId, to: &mut QuicT
             &Message::Input(InputFrame {
                 tick,
                 actions: Vec::new(),
+                ack: None,
             }),
             Channel::Unreliable,
         );
@@ -223,7 +223,7 @@ fn an_unreliable_message_too_big_for_a_datagram_still_arrives() {
             id: NetId(id),
             parent: None,
             name: Some(format!("crate {id}")),
-            transform: TransformDesc::default(),
+            transform: NetTransform::default(),
             mesh: Some("builtin://cube".into()),
             color: None,
             texture: None,
@@ -232,6 +232,7 @@ fn an_unreliable_message_too_big_for_a_datagram_still_arrives() {
         .collect();
     let big = Message::Snapshot(Snapshot {
         tick: 5,
+        baseline: None,
         entities,
         removed: vec![],
     });
