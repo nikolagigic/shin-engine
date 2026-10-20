@@ -3843,11 +3843,13 @@ name = "shin-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "env_logger",
  "log",
  "quinn",
  "rcgen",
  "shin-engine",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]

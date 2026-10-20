@@ -26,3 +26,8 @@ rcgen = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 anyhow = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# For `examples/net_arena.rs`: logging and the window's clear colour.
+env_logger = { workspace = true }
+wgpu = { workspace = true }
