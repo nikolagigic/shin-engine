@@ -34,6 +34,10 @@
 //! from the components when play starts and torn down when it stops
 //! ([`PhysicsWorld::clear`]); the play snapshot restores the transforms.
 //!
+//! On a multiplayer client, entities replicated from the server
+//! ([`RemoteEntity`]) are never simulated, even if they carry a body or
+//! collider: the server's physics moves them.
+//!
 //! Not supported (yet): joints, character controllers, trigger events,
 //! continuous collision detection, and colliders on children (compound
 //! shapes).
@@ -62,6 +66,7 @@ pub(crate) use tools::{body_json, collider_json};
 use crate::ecs::{Entity, Resources, Time, World, parent_of};
 use crate::headless::PlayState;
 use crate::math::{Quat, Transform, Vec3};
+use crate::net::RemoteEntity;
 
 /// The gravity a new [`PhysicsWorld`] starts with, in m/s².
 pub const DEFAULT_GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -379,6 +384,7 @@ impl PhysicsWorld {
         let mut wanted: HashMap<Entity, (Source, Transform)> = HashMap::new();
         for (entity, transform, body, collider) in world
             .query::<(Entity, &Transform, Option<&RigidBody>, Option<&Collider>)>()
+            .without::<&RemoteEntity>()
             .iter()
         {
             if body.is_none() && collider.is_none() {

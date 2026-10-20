@@ -647,13 +647,16 @@ what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
 ```sh
 cargo run -- --serve            # a dedicated server: no window
 cargo run -- --host             # play in a window and host
+cargo run -- --join HOST:PORT   # play in a window, joined to a server
 ```
 
 Both run the game's own systems as the authority and send snapshots of
 the replicated entities to joined players; `--port N` picks the port
 (default 7777), and Ctrl-C stops a dedicated server. `shin serve .` is
-the same as `cargo run -- --serve`. The network transport is not built
-yet, so for now no other process can join.
+the same as `cargo run -- --serve`. `--join` makes the window a client
+that shows the server's replicated entities. The network transport is
+not built yet, so for now no other process can join, and `--join` says so
+and exits.
 
 ## Controls
 
@@ -666,7 +669,7 @@ yet, so for now no other process can join.
 
 ```
 shin.toml       project name, window settings, entry scene, input actions
-src/main.rs     the game: systems, tools, window, --mcp, --serve, --host
+src/main.rs     the game: systems, tools, window, --mcp, --serve, --host, --join
 scenes/         scene files (.scene.ron)
 scripts/        Rhai scripts (player.rhai drives the cube; moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)

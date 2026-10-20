@@ -14,11 +14,16 @@
 //!   one.
 //! - [`server`]: the authority (GE-041): [`NetServer`],
 //!   [`net_server_system`], and [`run_server`] for a dedicated server.
+//! - [`client`]: joining one (GE-042): [`NetClient`],
+//!   [`net_client_system`], [`apply_pending`], and
+//!   [`net_interpolate_system`]; replicated entities on a client are
+//!   [`RemoteEntity`]s.
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
 //!   [`LoopbackTransport`], an in-process implementation for tests.
 //!
 //! Tools: [`register_tools`] adds `net.status`.
 
+pub mod client;
 pub mod protocol;
 pub mod server;
 pub mod snapshot;
@@ -32,6 +37,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ecs::Entity;
 
+pub use client::{
+    ClientState, NetClient, RemoteEntity, SnapshotBuffer, apply_pending, net_client_system,
+    net_interpolate_system,
+};
 pub use protocol::{
     EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
 };

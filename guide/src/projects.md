@@ -22,7 +22,7 @@ with a digit.
 mygame/
   Cargo.toml              the package; depends on shin-engine, shin-mcp, and shin-net
   shin.toml               project name, window settings, and entry scene
-  src/main.rs             the game: systems, tools, window, --mcp, --serve, --host
+  src/main.rs             the game: systems, tools, window, --mcp, --serve, --host, --join
   scenes/main.scene.ron   the starter scene (the entry scene)
   scripts/player.rhai     moves the cube with the input actions
   assets/cube.gltf        the cube mesh the starter scene draws
@@ -163,18 +163,21 @@ created inside another Cargo workspace.
 ## The starter game
 
 `src/main.rs` is a complete game that reads its window settings from
-`shin.toml` at run time, so it needs no substitution. It has four modes:
+`shin.toml` at run time, so it needs no substitution. It has five modes:
 
 ```text
 cargo run                         play in a window
 cargo run -- --mcp                serve this game to an agent over MCP (stdio)
 cargo run -- --serve [--port N]   a dedicated multiplayer server, no window
 cargo run -- --host [--port N]    play in a window and host a multiplayer game
+cargo run -- --join <host:port> (--insecure | --cert <path>)
+                                  play in a window as a client of a server
 ```
 
 `shin serve <dir> [--port N]` runs `cargo run -- --serve` in the project
 for you. The two server modes are covered in
-[Multiplayer](multiplayer.md#hosting).
+[Multiplayer](multiplayer.md#hosting), and joining in
+[Multiplayer](multiplayer.md#joining).
 
 Every mode builds the same world, systems, and resources: an `orbit`
 system that moves the entity named `moon` on a circle around the cube,
