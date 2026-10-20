@@ -34,7 +34,8 @@ shin new mygame
 
 This writes `./mygame` and prints every file it wrote. The project is an
 ordinary Cargo package that depends on the published `shin-engine` crate
-(and `shin-mcp`, for agents) at the version of `shin` you installed. The
+(plus `shin-mcp` for agents and `shin-net` for multiplayer) at the
+version of `shin` you installed. The
 project layout and its `shin.toml` are described in
 [Projects](projects.md).
 
