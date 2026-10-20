@@ -8,7 +8,8 @@
 //! cargo run -- --mcp                serve this game to an agent over MCP (stdio)
 //! cargo run -- --serve [--port N]   run a dedicated multiplayer server, no window
 //! cargo run -- --host [--port N]    play in a window and host a multiplayer game
-//! cargo run -- --join <addr>        play in a window as a client of a server
+//! cargo run -- --join <addr> --cert <path>   play in a window as a client of a server
+//! cargo run -- --join <addr> --insecure      the same, trusting any server (development only)
 //! ```
 //!
 //! Every mode builds the same world, systems ([`game_schedule`]), and
@@ -23,8 +24,10 @@
 //! forward and back, A/D strafe, E/Q up and down fly the camera; hold the
 //! right mouse button to look around; Escape quits.
 
+use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::Deserialize;
 use shin::app::{self, AppConfig, EcsGame};
 use shin::asset::Assets;
@@ -35,8 +38,8 @@ use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::net::{
-    LoopbackTransport, NetClient, NetServer, ServerOptions, Transport, net_client_system,
-    net_interpolate_system, net_server_system,
+    NetClient, NetServer, ServerOptions, Transport, net_client_system, net_interpolate_system,
+    net_server_system,
 };
 use shin::physics::physics_system;
 use shin::project::Project;
@@ -44,6 +47,7 @@ use shin::render::{RenderState, render_world};
 use shin::scene;
 use shin::script::script_system;
 use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
+use shin_net::{QuicTransport, ServerTrust};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -51,6 +55,10 @@ const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 /// The UDP port `--serve` and `--host` listen on unless `--port` says
 /// otherwise.
 const DEFAULT_PORT: u16 = 7777;
+
+/// Where a server saves its certificate, relative to the project root
+/// (`target/` is ignored by git, and the file changes every start).
+const CERT_FILE: &str = "target/shin-server-cert.der";
 
 /// Linear clear colour: a dusky sky blue.
 const SKY: wgpu::Color = wgpu::Color {
@@ -163,31 +171,54 @@ fn serve_mcp(project: Project) -> anyhow::Result<()> {
     })
 }
 
-/// The network transport a server listens on.
+/// The network transport a server listens on: QUIC on UDP `port`, on
+/// every network interface.
 ///
-/// No network transport is built into the engine yet, so this is an
-/// in-process loopback with no clients: the server runs and simulates,
-/// but nobody can connect from another process. The real transport
-/// replaces this function's body.
-fn server_transport(port: u16) -> Box<LoopbackTransport> {
-    log::warn!(
-        "no network transport is built yet: serving on an in-process loopback, \
-         so port {port} is not opened and no remote client can join"
+/// The server makes a fresh self-signed certificate each time it starts
+/// and saves it to [`CERT_FILE`], so a client on this machine (or one you
+/// copy the file to) can trust exactly this server with `--cert`.
+fn server_transport(port: u16) -> anyhow::Result<Box<QuicTransport>> {
+    let transport = QuicTransport::listen((Ipv4Addr::UNSPECIFIED, port).into())?;
+    let cert = Path::new(ROOT).join(CERT_FILE);
+    if let Some(dir) = cert.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let der = transport.cert_der().expect("a server has a certificate");
+    std::fs::write(&cert, der)?;
+    log::info!(
+        "clients join with `cargo run -- --join <this machine>:{port} --cert {}` \
+         (or `--insecure` instead of `--cert`, for development only)",
+        cert.display()
     );
-    Box::new(LoopbackTransport::pair(0).0)
+    Ok(Box::new(transport))
 }
 
-/// The network transport a client joins `addr` over.
-///
-/// No network transport is built into the engine yet, so joining another
-/// process is not possible: this fails, saying so. The real transport
-/// replaces this function's body.
-fn client_transport(addr: &str) -> anyhow::Result<Box<dyn Transport + Send>> {
-    anyhow::bail!(
-        "cannot join {addr}: no network transport is built into the engine yet, \
-         so a game cannot connect to another process. Joining over the network \
-         arrives with the QUIC transport."
-    )
+/// The network transport a client joins `addr` (`host:port`, e.g.
+/// `127.0.0.1:7777`) over: QUIC, trusting the server's certificate as
+/// `trust` says. Fails if the server does not answer.
+fn client_transport(addr: &str, trust: &ServerTrust) -> anyhow::Result<Box<dyn Transport + Send>> {
+    let resolved = addr
+        .to_socket_addrs()
+        .with_context(|| format!("`{addr}` is not a host:port address"))?
+        .next()
+        .with_context(|| format!("`{addr}` resolves to no address"))?;
+    Ok(Box::new(QuicTransport::connect(resolved, trust)?))
+}
+
+/// Which server certificate a client trusts, from the flags after
+/// `--join <addr>`: `--insecure` (any, for development) or `--cert <path>`
+/// (the [`CERT_FILE`] the server saved).
+fn server_trust(flags: &[String]) -> anyhow::Result<ServerTrust> {
+    match flags {
+        [flag] if flag == "--insecure" => Ok(ServerTrust::Insecure),
+        [flag, path] if flag == "--cert" => {
+            let der = std::fs::read(path).with_context(|| format!("reading certificate {path}"))?;
+            Ok(ServerTrust::Cert(der))
+        }
+        _ => anyhow::bail!(
+            "--join needs `--insecure` or `--cert <path>` (the server prints the path)"
+        ),
+    }
 }
 
 /// The name this player joins with: the user's login name, or `player`.
@@ -209,7 +240,7 @@ fn serve(project: Project, port: u16) -> anyhow::Result<()> {
         "serving `{}` on port {port}; press Ctrl-C to stop",
         project.name
     );
-    shin::net::run_server(&mut engine, server_transport(port), ServerOptions::default())
+    shin::net::run_server(&mut engine, server_transport(port)?, ServerOptions::default())
 }
 
 /// First-frame setup in the window: the renderer for the window's colour
@@ -255,7 +286,7 @@ fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
         Net::Host(_) => {
             schedule.add_fixed("net_server", net_server_system);
         }
-        Net::Join(_) => {
+        Net::Join(..) => {
             schedule.add_fixed("net_client", net_client_system);
             schedule.add_frame("net_interpolate", net_interpolate_system);
         }
@@ -265,13 +296,13 @@ fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
         Net::Solo => {}
         Net::Host(port) => {
             let opts = ServerOptions::default();
-            let mut server = NetServer::new(server_transport(port), opts.snapshot_every);
+            let mut server = NetServer::new(server_transport(port)?, opts.snapshot_every);
             server.add_local_player();
             game.resources.insert(server);
             log::info!("hosting `{}` on port {port}", project.name);
         }
-        Net::Join(addr) => {
-            let client = NetClient::new(client_transport(&addr)?, &player_name());
+        Net::Join(addr, trust) => {
+            let client = NetClient::new(client_transport(&addr, &trust)?, &player_name());
             game.resources.insert(client);
             log::info!("joining {addr}");
         }
@@ -317,7 +348,7 @@ fn main() -> anyhow::Result<()> {
         Mode::Mcp => serve_mcp(project),
         Mode::Serve(port) => serve(project, port),
         Mode::Host(port) => run_window(project, Net::Host(port)),
-        Mode::Join(addr) => run_window(project, Net::Join(addr)),
+        Mode::Join(addr, trust) => run_window(project, Net::Join(addr, trust)),
     }
 }
 
@@ -327,8 +358,9 @@ enum Net {
     Solo,
     /// A listen server on this port.
     Host(u16),
-    /// A client of the server at this address.
-    Join(String),
+    /// A client of the server at this address, trusting its certificate
+    /// as the [`ServerTrust`] says.
+    Join(String, ServerTrust),
 }
 
 /// How the game was asked to run.
@@ -341,15 +373,15 @@ enum Mode {
     Serve(u16),
     /// `--host [--port N]`: a window that is also a server on port `N`.
     Host(u16),
-    /// `--join <addr>`: a window that is a client of the server at `addr`
-    /// (`host:port`).
-    Join(String),
+    /// `--join <addr> (--insecure | --cert <path>)`: a window that is a
+    /// client of the server at `addr` (`host:port`).
+    Join(String, ServerTrust),
 }
 
 /// Reads the command line (without the program name).
 fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
-    const USAGE: &str =
-        "usage: cargo run [-- --mcp | --serve [--port N] | --host [--port N] | --join <host:port>]";
+    const USAGE: &str = "usage: cargo run [-- --mcp | --serve [--port N] | --host [--port N] \
+                         | --join <host:port> (--insecure | --cert <path>)]";
     let port = |rest: &[String]| -> anyhow::Result<u16> {
         match rest {
             [] => Ok(DEFAULT_PORT),
@@ -364,7 +396,9 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         [flag] if flag == "--mcp" => Ok(Mode::Mcp),
         [flag, rest @ ..] if flag == "--serve" => Ok(Mode::Serve(port(rest)?)),
         [flag, rest @ ..] if flag == "--host" => Ok(Mode::Host(port(rest)?)),
-        [flag, addr] if flag == "--join" && !addr.starts_with("--") => Ok(Mode::Join(addr.clone())),
+        [flag, addr, trust @ ..] if flag == "--join" && !addr.starts_with("--") => {
+            Ok(Mode::Join(addr.clone(), server_trust(trust)?))
+        }
         _ => anyhow::bail!(USAGE),
     }
 }

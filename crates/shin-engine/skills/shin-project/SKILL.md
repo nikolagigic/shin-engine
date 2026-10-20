@@ -32,7 +32,7 @@ target folder must be missing or empty.
 
 ```text
 shin.toml              project name, window title and size, entry scene
-Cargo.toml             depends on shin-engine and shin-mcp
+Cargo.toml             depends on shin-engine, shin-mcp, and shin-net
 src/main.rs            the game: systems, game tools, window, --mcp, --serve, --host, --join
 scenes/main.scene.ron  the entry scene, loaded on start
 scripts/               Rhai scripts: player.rhai (the cube), moon.rhai
@@ -62,9 +62,10 @@ and loads the entry scene. `project.info` (no arguments) re-reads
 - `cargo run -- --serve [--port 7777]`: no window; a dedicated
   multiplayer server running the game's systems at the fixed rate until
   Ctrl-C (`shin serve .` does the same). `--host` plays in a window and
-  serves from it. `--join <host:port>` plays in a window as a client of
-  a server. No network transport is built yet, so no other process can
-  join, and `--join` exits saying so.
+  serves from it, over QUIC on that UDP port. `--join <host:port>
+  --cert target/shin-server-cert.der` (the certificate the server saves)
+  or `--join <host:port> --insecure` (development only) plays in a
+  window as a client of a server.
 - `shin edit .`: opens the project in the editor.
 - `shin-mcp --project .`: the engine's own server on this project,
   without the game's systems or tools.

@@ -82,8 +82,8 @@ Peers exchange a small set of messages, encoded compactly in binary:
 differs from the server's is turned away with a `Goodbye` that says so.
 
 Messages travel over a **transport**. The engine ships an in-process
-loopback transport used by the tests; the network transport comes later in
-this milestone.
+loopback transport used by the tests; the `shin-net` crate provides the
+network transport, QUIC (see [Over the network](#over-the-network)).
 
 ## Hosting
 
@@ -129,11 +129,6 @@ Each tick, after all your systems, the server:
 When a dedicated server stops on its own (a system sets `ExitRequest`),
 it sends every player a `Goodbye` first.
 
-> **Not yet networked.** The network transport arrives later in this
-> milestone. Until then both server modes run on an in-process loopback:
-> they start, simulate, and log as described, but the port is not opened
-> and no other process can join. The game logs a warning saying so.
-
 In Rust, the pieces are in `shin::net`: `NetServer` (a resource holding
 the transport and players), `net_server_system` (add it last to the fixed
 schedule), and `run_server`, which does both on a headless engine and runs
@@ -142,11 +137,13 @@ the dedicated loop. The template's `src/main.rs` shows both modes.
 ## Joining
 
 ```sh
-cargo run -- --join 127.0.0.1:7777
+cargo run -- --join 127.0.0.1:7777 --insecure
 ```
 
 `--join <host:port>` opens the game's window as a **client** of the
-server at that address. The client says `Hello` (its protocol version
+server at that address. It also needs `--insecure` or `--cert <path>` to
+say which server certificate to trust (see
+[Over the network](#over-the-network)). The client says `Hello` (its protocol version
 and a player name, your login name), the server answers `Welcome` with a
 player id, and from then on the client applies the server's snapshots:
 replicated entities appear, move, and disappear as they do on the
@@ -162,9 +159,8 @@ When the server says `Goodbye` (it shut down, or turned the client away
 because the protocol versions differ) or the connection drops, the
 client is disconnected and replicated entities stay where they were.
 
-> **Not yet networked.** With no network transport built yet, `--join`
-> checks its arguments and then exits with an error saying so. The
-> client itself works and is tested over the in-process loopback.
+If the server does not answer within five seconds, or its certificate is
+not the one trusted, `--join` exits with an error saying so.
 
 In Rust, the pieces are in `shin::net`: `NetClient` (a resource holding
 the transport, the session state, and the snapshot buffer),
@@ -215,6 +211,61 @@ longer delay hides more network jitter but shows the world further in
 the past; `0` shows each snapshot as soon as it arrives, with no
 smoothing.
 
+## Over the network
+
+Both server modes listen with **QUIC** over UDP, from the `shin-net`
+crate that every new project depends on. QUIC carries reliable messages
+(`Hello`, `Welcome`, `Goodbye`) on one ordered stream per player and
+snapshots and inputs as unreliable datagrams, all encrypted with TLS 1.3.
+A snapshot too big for one datagram (about 1200 bytes) is sent on the
+stream instead, so large worlds still replicate.
+
+**Ports.** The server listens on UDP port 7777 on every network interface
+(`--port N` changes it). Players on other machines need that UDP port
+reachable: open it in the firewall, and on a home network forward it on
+the router. There is no NAT traversal or relay.
+
+**Certificates.** QUIC needs a certificate, so the server makes a fresh
+self-signed one for `localhost` every time it starts. It logs the
+certificate's SHA-256 fingerprint and saves it to
+`target/shin-server-cert.der` in the project, with the command a client
+joins with:
+
+```text
+INFO  net: QUIC server listening on 0.0.0.0:7777; certificate SHA-256 fingerprint 3F:A2:...
+INFO  clients join with `cargo run -- --join <this machine>:7777 --cert /home/you/mygame/target/shin-server-cert.der` (or `--insecure` instead of `--cert`, for development only)
+```
+
+A client trusts the server in one of two ways:
+
+- `--cert <path>`: exactly the certificate in that file. On the same
+  machine, point it at the server's `target/shin-server-cert.der`;
+  elsewhere, copy the file over. The file changes every time the server
+  starts.
+- `--insecure`: any certificate. The connection is still encrypted, but
+  nothing checks that the server is the one you meant, so use it only
+  for development on a network you trust. The client logs a warning.
+
+Two processes on one machine, the second showing the server's crates
+falling:
+
+```sh
+cargo run -- --serve                                # terminal 1
+cargo run -- --join 127.0.0.1:7777 --insecure       # terminal 2
+cargo run -- --join 127.0.0.1:7777 --cert target/shin-server-cert.der   # or this
+```
+
+These certificates are for development; real certificate authorities,
+relays, and browser transports are not part of this milestone.
+
+In Rust, `shin_net::QuicTransport::listen(addr)` makes a server transport
+and `QuicTransport::connect(addr, &trust)` a client one, where `trust` is
+`ServerTrust::Cert(der_bytes)` or `ServerTrust::Insecure`. Both are
+`Send`, so they go wherever a transport does, such as
+`NetServer::new(Box::new(transport), ...)`. The template's
+`server_transport` and `client_transport` functions are the examples.
+
+
 ## Tools
 
 `net.status` reports the engine's multiplayer role. Today that is always
@@ -224,7 +275,6 @@ smoothing.
 
 - Player inputs sent to the server, and script hooks for players joining
   and leaving.
-- A real network transport (QUIC).
 - Host and Join in the editor, and `net.*` tools to host, join, and
   inspect a session.
 - Client-side prediction for the player's own entity.

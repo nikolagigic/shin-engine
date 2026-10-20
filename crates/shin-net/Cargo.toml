@@ -1,0 +1,28 @@
+[package]
+name = "shin-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "QUIC network transport (quinn) for Shin engine multiplayer: reliable streams and unreliable datagrams behind the engine's polled Transport trait."
+keywords = ["gamedev", "engine", "multiplayer", "quic", "networking"]
+categories = ["game-engines", "network-programming"]
+# Sources only; tests stay in the repository.
+include = ["src/**"]
+
+[lib]
+name = "shin_net"
+path = "src/lib.rs"
+
+[dependencies]
+shin-engine = { workspace = true }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+# The runtime the transport runs inside; `net` and `time` drive sockets
+# and timers.
+tokio = { workspace = true, features = ["net", "time"] }
+anyhow = { workspace = true }
+log = { workspace = true }

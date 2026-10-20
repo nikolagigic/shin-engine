@@ -118,6 +118,7 @@ crates/shin-engine/   the engine library (package `shin-engine`, lib `shin`)
   examples/           runnable demos
   tests/              integration + golden-image tests
 crates/shin-mcp/      MCP server (stdio) over the engine's tool registry
+crates/shin-net/      QUIC network transport for multiplayer (quinn)
 crates/shin-cli/      the `shin` command-line tool (`shin new`)
 ```
 

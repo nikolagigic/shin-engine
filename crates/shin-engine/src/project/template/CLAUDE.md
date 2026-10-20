@@ -14,8 +14,10 @@ capability is a named tool.
 - `cargo run -- --serve [--port 7777]`: a dedicated multiplayer server
   (no window) running the game's systems; Ctrl-C stops it. `--host`
   instead plays in a window and serves from it. `shin serve .` runs
-  `--serve`. `--join <host:port>` plays in a window as a client of a
-  server (it exits with a message until the network transport exists).
+  `--serve`. The server speaks QUIC on that UDP port and saves its
+  development certificate to `target/shin-server-cert.der` for clients.
+- `cargo run -- --join <host:port> --cert <path>` (or `--insecure`, for
+  development only): play in a window as a client of a server.
 - `shin edit .`: open the project in the Shin editor.
 
 ## Agents

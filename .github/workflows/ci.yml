@@ -148,7 +148,7 @@ jobs:
           key: ${{ runner.os }}-publish-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-publish-
       - name: cargo publish --dry-run
-        run: cargo publish --dry-run --locked -p shin-engine -p shin-mcp -p shin-cli -p shin-editor
+        run: cargo publish --dry-run --locked -p shin-engine -p shin-mcp -p shin-net -p shin-cli -p shin-editor
 
   # GE-029: the user guide builds and its generated tools reference is up
   # to date. mdBook comes from the prebuilt release tarball, not

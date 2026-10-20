@@ -20,7 +20,7 @@ with a digit.
 
 ```text
 mygame/
-  Cargo.toml              the package; depends on shin-engine and shin-mcp
+  Cargo.toml              the package; depends on shin-engine, shin-mcp, and shin-net
   shin.toml               project name, window settings, and entry scene
   src/main.rs             the game: systems, tools, window, --mcp, --serve, --host, --join
   scenes/main.scene.ron   the starter scene (the entry scene)
@@ -130,9 +130,10 @@ editor is not supported yet; edit `shin.toml` and reopen the project.
 
 ## The engine dependency
 
-The generated `Cargo.toml` depends on `shin-engine` (the engine) and
-`shin-mcp` (so `cargo run -- --mcp` can serve the game to agents), from
-the same place:
+The generated `Cargo.toml` depends on `shin-engine` (the engine),
+`shin-mcp` (so `cargo run -- --mcp` can serve the game to agents), and
+`shin-net` (the QUIC transport that `--serve` and `--host` listen on), all
+from the same place:
 
 - By default, crates.io, at the version of the `shin` that created the
   project (Cargo reads `"0.1.0"` as "0.1.0 or any later 0.1.x"):
@@ -140,15 +141,17 @@ the same place:
   ```toml
   shin-engine = "0.1.0"
   shin-mcp = "0.1.0"
+  shin-net = "0.1.0"
   ```
 
 - With `--engine-path <checkout>/crates/shin-engine`, a local checkout.
-  The path is made absolute, and `shin-mcp` is taken from the sibling
-  `crates/shin-mcp` directory:
+  The path is made absolute, and `shin-mcp` and `shin-net` are taken
+  from the sibling `crates/shin-mcp` and `crates/shin-net` directories:
 
   ```toml
   shin-engine = { path = "/home/you/shin-engine/crates/shin-engine" }
   shin-mcp = { path = "/home/you/shin-engine/crates/shin-mcp" }
+  shin-net = { path = "/home/you/shin-engine/crates/shin-net" }
   ```
 
 The manifest also pins `wgpu`, `anyhow`, `env_logger`, `log`, `serde`, and
@@ -167,7 +170,8 @@ cargo run                         play in a window
 cargo run -- --mcp                serve this game to an agent over MCP (stdio)
 cargo run -- --serve [--port N]   a dedicated multiplayer server, no window
 cargo run -- --host [--port N]    play in a window and host a multiplayer game
-cargo run -- --join <host:port>   play in a window as a client of a server
+cargo run -- --join <host:port> (--insecure | --cert <path>)
+                                  play in a window as a client of a server
 ```
 
 `shin serve <dir> [--port N]` runs `cargo run -- --serve` in the project

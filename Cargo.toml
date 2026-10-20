@@ -19,6 +19,7 @@ readme = "README.md"
 # with the workspace version.
 shin-engine = { path = "crates/shin-engine", version = "0.1.0" }
 shin-mcp = { path = "crates/shin-mcp", version = "0.1.0" }
+shin-net = { path = "crates/shin-net", version = "0.1.0" }
 # Windowing & input
 winit = "0.30"
 # GPU
@@ -64,6 +65,10 @@ transform-gizmo-egui = "0.11"
 
 # Milestone 4 (ADR 0011): multiplayer. The snapshot and message codec.
 postcard = { version = "1", features = ["use-std"] }
+# The QUIC transport crate `shin-net` only (GE-045; never in the engine lib).
+# ring rather than aws-lc-rs as the crypto backend: no cmake or NASM needed.
+quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 
 [profile.dev]
 opt-level = 1            # keep debug builds usable for a real-time loop

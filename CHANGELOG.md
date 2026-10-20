@@ -4,7 +4,7 @@ All notable changes to Shin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Shin is
 pre-alpha: while the major version is 0, any minor release may contain
-breaking changes. All crates (`shin-engine`, `shin-mcp`, `shin-cli`,
+breaking changes. All crates (`shin-engine`, `shin-mcp`, `shin-net`, `shin-cli`,
 `shin-editor`) share one version.
 
 The release workflow publishes the section of a version, from its heading
