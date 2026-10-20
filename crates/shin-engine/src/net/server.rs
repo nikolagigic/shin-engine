@@ -25,17 +25,26 @@
 //!    this tick (it is not in the schedule), this one runs it first, so a
 //!    server works with `net_server_system` alone, with input a tick later.
 //!
+//! Snapshots go out as deltas (GE-049): each client acknowledges the
+//! newest snapshot it holds in its [`InputFrame::ack`], and the server
+//! sends it only what changed since that one ([`diff`]). A player gets a
+//! full snapshot instead when it joins, when its acknowledged snapshot is
+//! older than the server keeps, and at least every
+//! [`ServerOptions::full_snapshot_every`] ticks, so a client that lost
+//! track always recovers. [`NetServer::bandwidth`] compares the bytes
+//! sent with what full snapshots would have cost.
+//!
 //! [`NetServer::solo`] is a server with nobody to serve but the local
 //! player: single-player games run the same scripts as multiplayer ones.
 //!
 //! [`Snapshot`]: super::Snapshot
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use super::players::PlayerInputs;
-use super::protocol::{InputFrame, Message, reject_version};
-use super::snapshot::capture;
+use super::protocol::{InputFrame, Message, encode, reject_version};
+use super::snapshot::{capture, diff};
 use super::transport::{Channel, Event, LoopbackTransport, PeerId, Transport};
 use super::{PlayerId, Snapshot};
 use crate::app::FixedTimestep;
@@ -60,25 +69,106 @@ pub struct NetServer {
     tick: u64,
     /// A snapshot goes out on every tick divisible by this.
     snapshot_every: u32,
+    /// A player gets a full snapshot at least every this many ticks.
+    full_every: u64,
+    /// The snapshots captured in the last `full_every` ticks, oldest
+    /// first: the baselines deltas can be made against.
+    history: VecDeque<Snapshot>,
+    /// What each remote player acknowledged and when it last got a full
+    /// snapshot.
+    baselines: HashMap<PeerId, Baseline>,
+    /// Snapshot bytes over the last second.
+    traffic: Traffic,
     /// Input frames received since the last tick, by sender.
     frames: Vec<(PlayerId, InputFrame)>,
     /// Whether this tick's input half has run.
     received: bool,
+    /// Made by [`Self::solo`]: nobody can join.
+    solo: bool,
+}
+
+/// One remote player's delta state.
+#[derive(Clone, Copy, Debug, Default)]
+struct Baseline {
+    /// The newest snapshot tick the client acknowledged.
+    acked: Option<u64>,
+    /// The tick of the last full snapshot sent to it.
+    last_full: Option<u64>,
+}
+
+/// Snapshot bytes sent over a sliding window of one second of ticks.
+#[derive(Debug, Default)]
+struct Traffic {
+    /// `(tick, full bytes, sent bytes)` per snapshot tick, oldest first.
+    ticks: VecDeque<(u64, usize, usize)>,
+}
+
+impl Traffic {
+    /// Records the bytes of one snapshot tick and forgets those a second
+    /// (`ticks_per_second`) or more older.
+    fn record(&mut self, tick: u64, full: usize, sent: usize, ticks_per_second: u64) {
+        self.ticks.push_back((tick, full, sent));
+        let window = ticks_per_second.max(1);
+        while self
+            .ticks
+            .front()
+            .is_some_and(|&(t, ..)| t + window <= tick)
+        {
+            self.ticks.pop_front();
+        }
+    }
+}
+
+/// Snapshot traffic of a [`NetServer`] over the last second of ticks, to
+/// every remote player together ([`NetServer::bandwidth`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bandwidth {
+    /// What sending every player a full snapshot each time would have
+    /// cost, in bytes per second: the "before".
+    pub full_bytes_per_s: f64,
+    /// What was actually sent, deltas and full snapshots, in bytes per
+    /// second: the "after".
+    pub sent_bytes_per_s: f64,
+}
+
+impl Bandwidth {
+    /// How many times smaller the traffic is than with full snapshots
+    /// only (`full / sent`); `None` while nothing was sent.
+    pub fn compression_ratio(&self) -> Option<f64> {
+        (self.sent_bytes_per_s > 0.0).then(|| self.full_bytes_per_s / self.sent_bytes_per_s)
+    }
 }
 
 impl NetServer {
     /// A server accepting clients on `transport`, sending a snapshot every
-    /// `snapshot_every` ticks (`0` is treated as `1`: every tick).
+    /// `snapshot_every` ticks (`0` is treated as `1`: every tick), with
+    /// the other [`ServerOptions`] at their defaults.
     pub fn new(transport: Box<dyn Transport + Send>, snapshot_every: u32) -> Self {
+        Self::with_options(
+            transport,
+            ServerOptions {
+                snapshot_every,
+                ..ServerOptions::default()
+            },
+        )
+    }
+
+    /// A server accepting clients on `transport`, run as `opts` says.
+    pub fn with_options(transport: Box<dyn Transport + Send>, opts: ServerOptions) -> Self {
         Self {
             transport,
             players: HashMap::new(),
             local: None,
             next_player: 1,
             tick: 0,
-            snapshot_every: snapshot_every.max(1),
+            snapshot_every: opts.snapshot_every.max(1),
+            full_every: u64::from(opts.full_snapshot_every.max(1)),
+            history: VecDeque::new(),
+            baselines: HashMap::new(),
+            traffic: Traffic::default(),
             frames: Vec::new(),
             received: false,
+            solo: false,
         }
     }
 
@@ -91,7 +181,13 @@ impl NetServer {
         let (transport, _) = LoopbackTransport::pair(0);
         let mut server = Self::new(Box::new(transport), ServerOptions::default().snapshot_every);
         server.add_local_player();
+        server.solo = true;
         server
+    }
+
+    /// Whether this is a [`Self::solo`] server, which nobody can join.
+    pub fn is_solo(&self) -> bool {
+        self.solo
     }
 
     /// Adds the host's own player on a listen server and returns its id
@@ -125,6 +221,20 @@ impl NetServer {
         self.tick
     }
 
+    /// Snapshot bytes sent to remote players over the last second of
+    /// ticks, and what full snapshots would have cost.
+    pub fn bandwidth(&self) -> Bandwidth {
+        let (full, sent) = self
+            .traffic
+            .ticks
+            .iter()
+            .fold((0, 0), |(f, s), &(_, full, sent)| (f + full, s + sent));
+        Bandwidth {
+            full_bytes_per_s: full as f64,
+            sent_bytes_per_s: sent as f64,
+        }
+    }
+
     /// Tells every remote player the session is ending with a
     /// [`Message::Goodbye`] carrying `reason`, and forgets them.
     pub fn shutdown(&mut self, reason: &str) {
@@ -135,6 +245,7 @@ impl NetServer {
             self.transport.send(peer, &bye, Channel::Reliable);
         }
         self.players.clear();
+        self.baselines.clear();
     }
 
     fn fresh_player(&mut self) -> PlayerId {
@@ -155,7 +266,14 @@ impl NetServer {
                     self.leave(peer, &format!("said goodbye: {reason}"));
                 }
                 Event::Message(peer, Message::Input(frame)) => match self.players.get(&peer) {
-                    Some(&player) => self.frames.push((player, frame)),
+                    Some(&player) => {
+                        if let Some(ack) = frame.ack {
+                            let baseline = self.baselines.entry(peer).or_default();
+                            // Frames can arrive out of order; keep the newest.
+                            baseline.acked = baseline.acked.max(Some(ack));
+                        }
+                        self.frames.push((player, frame));
+                    }
                     None => log::debug!("net: input from peer {} before joining", peer.0),
                 },
                 Event::Message(peer, other) => {
@@ -204,6 +322,7 @@ impl NetServer {
 
     /// Forgets the player connected from `peer`, if any.
     fn leave(&mut self, peer: PeerId, why: &str) {
+        self.baselines.remove(&peer);
         match self.players.remove(&peer) {
             Some(player) => log::info!("net: player {} left ({why})", player.0),
             None => log::debug!("net: peer {} {why} before joining", peer.0),
@@ -215,13 +334,54 @@ impl NetServer {
         self.tick.is_multiple_of(u64::from(self.snapshot_every))
     }
 
-    /// Sends `snapshot` to every remote player.
-    fn send_snapshot(&mut self, snapshot: Snapshot) {
-        let msg = Message::Snapshot(snapshot);
+    /// Sends the full `snapshot` to every remote player, as a delta
+    /// against the snapshot it acknowledged where it can (see the module
+    /// docs), then keeps it as a baseline for later deltas.
+    /// `ticks_per_second` sizes the bandwidth window.
+    fn send_snapshot(&mut self, snapshot: Snapshot, ticks_per_second: u64) {
+        let tick = snapshot.tick;
+        let full = Message::Snapshot(snapshot);
+        let full_bytes = encode(&full).len();
+        let Message::Snapshot(snapshot) = &full else {
+            unreachable!("built above")
+        };
         let mut peers: Vec<PeerId> = self.players.keys().copied().collect();
         peers.sort();
-        for peer in peers {
-            self.transport.send(peer, &msg, Channel::Unreliable);
+        let mut sent_bytes = 0;
+        for &peer in &peers {
+            let baseline = self.baselines.entry(peer).or_default();
+            let full_due = baseline
+                .last_full
+                .is_none_or(|last| tick - last >= self.full_every);
+            let base = baseline.acked.and_then(|acked| {
+                self.history
+                    .binary_search_by_key(&acked, |s| s.tick)
+                    .ok()
+                    .map(|at| &self.history[at])
+            });
+            match base.filter(|_| !full_due) {
+                Some(base) => {
+                    let delta = Message::Snapshot(diff(base, snapshot));
+                    sent_bytes += encode(&delta).len();
+                    self.transport.send(peer, &delta, Channel::Unreliable);
+                }
+                None => {
+                    baseline.last_full = Some(tick);
+                    sent_bytes += full_bytes;
+                    self.transport.send(peer, &full, Channel::Unreliable);
+                }
+            }
+        }
+        self.traffic
+            .record(tick, full_bytes * peers.len(), sent_bytes, ticks_per_second);
+
+        let Message::Snapshot(snapshot) = full else {
+            unreachable!("built above")
+        };
+        self.history.push_back(snapshot);
+        let oldest = tick.saturating_sub(self.full_every);
+        while self.history.front().is_some_and(|s| s.tick < oldest) {
+            self.history.pop_front();
         }
     }
 }
@@ -269,6 +429,8 @@ pub fn net_server_system(world: &mut World, res: &mut Resources) {
     if !server.received {
         net_server_input_system(world, res);
     }
+    let fixed_dt = res.get::<Time>().map_or(1.0 / 60.0, |time| time.fixed_dt);
+    let ticks_per_second = (1.0 / fixed_dt).round() as u64;
     let server = res.expect_mut::<NetServer>();
     server.received = false;
     let tick = server.tick;
@@ -278,22 +440,30 @@ pub fn net_server_system(world: &mut World, res: &mut Resources) {
             .get::<PlayerInputs>()
             .map(PlayerInputs::last_input_ticks)
             .unwrap_or_default();
-        res.expect_mut::<NetServer>().send_snapshot(snapshot);
+        res.expect_mut::<NetServer>()
+            .send_snapshot(snapshot, ticks_per_second);
     }
     res.expect_mut::<NetServer>().tick += 1;
 }
 
-/// How [`run_server`] runs the authority.
+/// How a [`NetServer`] (and [`run_server`]) runs the authority.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerOptions {
     /// A snapshot goes out every this many ticks. Default 3: 20 per
     /// second at the default 60 Hz tick.
     pub snapshot_every: u32,
+    /// Each player gets a full snapshot rather than a delta at least
+    /// every this many ticks. Default 60: once a second at 60 Hz. `1`
+    /// sends only full snapshots (deltas off); `0` is treated as `1`.
+    pub full_snapshot_every: u32,
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
-        Self { snapshot_every: 3 }
+        Self {
+            snapshot_every: 3,
+            full_snapshot_every: 60,
+        }
     }
 }
 
@@ -321,7 +491,7 @@ pub fn run_server(
 ) -> anyhow::Result<()> {
     engine
         .resources
-        .insert(NetServer::new(transport, opts.snapshot_every));
+        .insert(NetServer::with_options(transport, opts));
     engine.resources.insert(ExitRequest(false));
     engine.schedule.add_fixed("net_server", net_server_system);
     engine.play()?;
@@ -411,6 +581,18 @@ mod tests {
     /// A world with one replicated entity and resources holding a server
     /// on a loopback with `clients` client ends.
     fn setup(clients: usize, every: u32) -> (World, Resources, Vec<LoopbackTransport>) {
+        let opts = ServerOptions {
+            snapshot_every: every,
+            ..ServerOptions::default()
+        };
+        setup_with(clients, opts)
+    }
+
+    /// [`setup`] with a server run as `opts` says.
+    fn setup_with(
+        clients: usize,
+        opts: ServerOptions,
+    ) -> (World, Resources, Vec<LoopbackTransport>) {
         let (server, clients) = LoopbackTransport::pair(clients);
         let mut world = World::new();
         world.spawn((Transform::default(), Replicated));
@@ -418,7 +600,7 @@ mod tests {
         let mut time = Time::default();
         time.advance_fixed(1.0 / 60.0);
         res.insert(time);
-        res.insert(NetServer::new(Box::new(server), every));
+        res.insert(NetServer::with_options(Box::new(server), opts));
         (world, res, clients)
     }
 
@@ -596,7 +778,10 @@ mod tests {
         run_server(
             &mut engine,
             Box::new(server),
-            ServerOptions { snapshot_every: 2 },
+            ServerOptions {
+                snapshot_every: 2,
+                ..ServerOptions::default()
+            },
         )?;
         assert!(engine.play_state().is_playing());
         assert_eq!(engine.resources.expect::<Time>().fixed_steps, 4);
@@ -612,5 +797,80 @@ mod tests {
         reg.call(&mut engine, "sim.stop", serde_json::json!({}))?;
         assert!(!engine.play_state().is_playing());
         Ok(())
+    }
+
+    /// An input frame acknowledging snapshot `ack`.
+    fn ack(ack: u64) -> Message {
+        Message::Input(InputFrame {
+            ack: Some(ack),
+            ..InputFrame::default()
+        })
+    }
+
+    /// `(tick, baseline)` of each snapshot in `msgs`.
+    fn kinds(msgs: &[Message]) -> Vec<(u64, Option<u64>)> {
+        msgs.iter()
+            .filter_map(|msg| match msg {
+                Message::Snapshot(snap) => Some((snap.tick, snap.baseline)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deltas_follow_the_acknowledged_snapshot_with_a_full_one_every_n_ticks() {
+        let opts = ServerOptions {
+            snapshot_every: 1,
+            full_snapshot_every: 4,
+        };
+        let (mut world, mut res, mut clients) = setup_with(1, opts);
+        let client = &mut clients[0];
+        client.send(PeerId(0), &hello("ada"), Channel::Reliable);
+
+        // Join: a full snapshot; nothing acknowledged, so still full.
+        tick(&mut world, &mut res, 2);
+        assert_eq!(kinds(&received(client)), [(0, None), (1, None)]);
+        // Each tick is a delta against the newest acknowledged snapshot.
+        client.send(PeerId(0), &ack(0), Channel::Unreliable);
+        tick(&mut world, &mut res, 1);
+        client.send(PeerId(0), &ack(2), Channel::Unreliable);
+        client.send(PeerId(0), &ack(1), Channel::Unreliable); // late: ignored
+        tick(&mut world, &mut res, 1);
+        let msgs = received(client);
+        assert_eq!(kinds(&msgs), [(2, Some(0)), (3, Some(2))]);
+        let Message::Snapshot(delta) = &msgs[1] else {
+            unreachable!()
+        };
+        assert!(delta.entities.is_empty(), "the one entity did not change");
+        // Four ticks after the last full snapshot (1), another one.
+        tick(&mut world, &mut res, 2);
+        assert_eq!(kinds(&received(client)), [(4, Some(2)), (5, None)]);
+        // An acknowledgement of a snapshot the server does not hold gets
+        // full snapshots, which always recover.
+        client.send(PeerId(0), &ack(999), Channel::Unreliable);
+        tick(&mut world, &mut res, 1);
+        assert_eq!(kinds(&received(client)), [(6, None)]);
+    }
+
+    #[test]
+    fn bandwidth_compares_sent_bytes_with_full_snapshots() {
+        let (mut world, mut res, mut clients) = setup(1, 1);
+        clients[0].send(PeerId(0), &hello("ada"), Channel::Reliable);
+        tick(&mut world, &mut res, 1);
+        let full = res.expect::<NetServer>().bandwidth();
+        assert!(full.full_bytes_per_s > 0.0);
+        assert_eq!(full.compression_ratio(), Some(1.0), "a full snapshot");
+        for t in 0..60 {
+            clients[0].send(PeerId(0), &ack(t), Channel::Unreliable);
+            tick(&mut world, &mut res, 1);
+        }
+        let bandwidth = res.expect::<NetServer>().bandwidth();
+        assert!(
+            bandwidth.sent_bytes_per_s < bandwidth.full_bytes_per_s,
+            "{bandwidth:?}"
+        );
+        assert!(bandwidth.compression_ratio().unwrap() > 1.0);
+        let none = Bandwidth::default();
+        assert_eq!(none.compression_ratio(), None);
     }
 }

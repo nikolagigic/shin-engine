@@ -397,6 +397,7 @@ mod tests {
                 &Message::Input(InputFrame {
                     tick,
                     actions: Vec::new(),
+                    ack: None,
                 }),
                 channel,
             );
@@ -453,6 +454,7 @@ mod tests {
         Message::Input(InputFrame {
             tick,
             actions: Vec::new(),
+            ack: None,
         })
     }
 

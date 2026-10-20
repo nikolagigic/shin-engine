@@ -198,6 +198,7 @@ mod project {
                         axis: 1.0,
                     },
                 )],
+                ack: None,
             };
             guest.send(PeerId(0), &Message::Input(frame), Channel::Unreliable);
             engine.step(1);

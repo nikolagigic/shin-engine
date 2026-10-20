@@ -369,6 +369,7 @@ fn history_acknowledges_through_a_tick() {
         frame: InputFrame {
             tick,
             actions: Vec::new(),
+            ack: None,
         },
         poses: Vec::new(),
     };

@@ -9,9 +9,12 @@
 //!    [`Message::Hello`] when connected, tracks the [`ClientState`]
 //!    (inserting [`LocalPlayer`] once welcomed), sends the player's
 //!    [`Actions`] as an [`InputFrame`](super::InputFrame) (GE-044), and
-//!    files incoming snapshots in the [`SnapshotBuffer`]. The snapshot that
-//!    is due (the newest one at least [`SnapshotBuffer::delay`] ticks older
-//!    than the newest received) becomes pending.
+//!    files incoming snapshots in the [`SnapshotBuffer`]. Deltas (GE-049)
+//!    are first patched onto the snapshot they are relative to, so the
+//!    buffer only ever holds full snapshots; each input frame acknowledges
+//!    the newest one. The snapshot that is due (the newest one at least
+//!    [`SnapshotBuffer::delay`] ticks older than the newest received)
+//!    becomes pending.
 //! 2. [`apply_pending`] (after the fixed steps, with the GPU): applies the
 //!    pending snapshot to the world with [`super::apply`], which may upload
 //!    meshes, and marks every entity it lists as a [`RemoteEntity`].
@@ -36,7 +39,7 @@ use anyhow::Context as _;
 use super::players::{LocalPlayer, input_frame};
 use super::predict::{InputHistory, Predicted, Prediction};
 use super::protocol::{Message, PROTOCOL_VERSION, Snapshot};
-use super::snapshot::apply;
+use super::snapshot::{apply, patch};
 use super::transport::{Channel, Event, PeerId, Transport};
 use super::{NetId, NetIds, Owner, PlayerId};
 use crate::ecs::{Entity, Resources, Time, World};
@@ -224,9 +227,17 @@ pub struct NetClient {
     server: Option<PeerId>,
     /// Client ticks run so far; stamps each [`InputFrame`](super::InputFrame).
     ticks: u64,
+    /// Full snapshots received (or patched from deltas), oldest first: the
+    /// baselines the server's deltas can be relative to.
+    baselines: VecDeque<Snapshot>,
     /// Local-player prediction, while it is on.
     prediction: Option<Prediction>,
 }
+
+/// At most this many baselines are kept; the oldest go first. The server
+/// only makes deltas against the newest one acknowledged, and keeps
+/// baselines for [`super::ServerOptions::full_snapshot_every`] ticks.
+const BASELINES: usize = 128;
 
 impl NetClient {
     /// A client that joins over `transport` as `name`, with the default
@@ -246,6 +257,7 @@ impl NetClient {
             buffer: SnapshotBuffer::new(delay),
             server: None,
             ticks: 0,
+            baselines: VecDeque::new(),
             prediction: Some(Prediction::default()),
         }
     }
@@ -290,6 +302,62 @@ impl NetClient {
         &self.buffer
     }
 
+    /// The newest full snapshot held: the tick each input frame
+    /// acknowledges to the server.
+    fn ack(&self) -> Option<u64> {
+        self.baselines.back().map(|snap| snap.tick)
+    }
+
+    /// The full snapshot `snap` stands for, kept as a baseline; `None` if
+    /// it cannot be had.
+    ///
+    /// A delta is patched onto the baseline it names, and baselines older
+    /// than that one are dropped (the server never goes back to them); a
+    /// delta whose baseline is gone (it arrived late) is dropped. A full
+    /// snapshot also lists as removed every entity the newest older
+    /// baseline had that it lacks, so a removal carried only by lost
+    /// deltas still happens.
+    fn receive(&mut self, mut snap: Snapshot) -> Option<Snapshot> {
+        match snap.baseline {
+            Some(baseline) => {
+                let Some(at) = self.baselines.iter().position(|s| s.tick == baseline) else {
+                    log::debug!(
+                        "net: dropping snapshot {}: baseline {baseline} is gone",
+                        snap.tick
+                    );
+                    return None;
+                };
+                snap = match patch(&self.baselines[at], &snap) {
+                    Ok(full) => full,
+                    Err(err) => {
+                        log::warn!("net: dropping snapshot {}: {err:#}", snap.tick);
+                        return None;
+                    }
+                };
+                self.baselines.drain(..at);
+            }
+            None => {
+                if let Some(older) = self.baselines.iter().rev().find(|s| s.tick < snap.tick) {
+                    let gone =
+                        older.entities.iter().map(|e| e.id).filter(|&id| {
+                            snap.entities.binary_search_by_key(&id, |e| e.id).is_err()
+                        });
+                    snap.removed.extend(gone);
+                    snap.removed.sort();
+                    snap.removed.dedup();
+                }
+            }
+        }
+        match self.baselines.binary_search_by_key(&snap.tick, |s| s.tick) {
+            Ok(_) => return None,
+            Err(at) => self.baselines.insert(at, snap.clone()),
+        }
+        while self.baselines.len() > BASELINES {
+            self.baselines.pop_front();
+        }
+        Some(snap)
+    }
+
     /// Handles everything the transport received since the last tick.
     fn handle_events(&mut self) {
         for event in self.transport.poll() {
@@ -317,10 +385,15 @@ impl NetClient {
                         player,
                     } => {
                         *server_tick = (*server_tick).max(snap.tick);
-                        if let Some(prediction) = &mut self.prediction {
-                            prediction.observe(&snap, *player);
+                        let player = *player;
+                        // Prediction reconciles against the full picture:
+                        // a delta leaves out a player that did not change.
+                        if let Some(full) = self.receive(snap) {
+                            if let Some(prediction) = &mut self.prediction {
+                                prediction.observe(&full, player);
+                            }
+                            self.buffer.push(full);
                         }
-                        self.buffer.push(snap);
                     }
                     _ => log::debug!("net: ignoring snapshot {} while not joined", snap.tick),
                 },
@@ -351,7 +424,8 @@ impl NetClient {
 /// [`ClientState::Disconnected`] on a goodbye or a dropped connection).
 /// Once welcomed, it keeps a [`LocalPlayer`] resource naming this client's
 /// player and sends the [`Actions`] resource (no actions without one) to
-/// the server as an unreliable [`Message::Input`] every tick. While
+/// the server as an unreliable [`Message::Input`] every tick, which also
+/// acknowledges the newest full snapshot held. While
 /// prediction is on, it then reconciles the [`Predicted`] entities with
 /// the newest snapshot and moves them with the same frame
 /// ([`super::predict`]). Then, unless disconnected, it advances the
@@ -364,10 +438,11 @@ pub fn net_client_system(world: &mut World, res: &mut Resources) {
     let dt = res
         .get::<Time>()
         .map_or(1.0 / 60.0, |time| time.fixed_dt as f32);
-    let frame = input_frame(client.ticks, res.get::<Actions>());
+    let mut frame = input_frame(client.ticks, res.get::<Actions>());
     let client = res.expect_mut::<NetClient>();
     client.handle_events();
     client.ticks += 1;
+    frame.ack = client.ack();
     if let (ClientState::Connected { player, .. }, Some(server)) = (&client.state, client.server) {
         let player = *player;
         client

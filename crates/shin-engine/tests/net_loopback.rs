@@ -7,15 +7,17 @@
 //! (GE-044), which the client must show too.
 //!
 //! - `client_matches_server_after_120_ticks`: a perfect loopback, a
-//!   snapshot every tick, no interpolation delay; after 120 ticks the
-//!   client's replicated entities list exactly as the server's.
+//!   snapshot every tick (deltas after the first, GE-049), no
+//!   interpolation delay; after 120 ticks the client's replicated
+//!   entities list exactly as the server's, rotations to within the
+//!   wire's precision.
 //! - `golden_net_replicated`: in that state the client's frame equals the
 //!   server's pixel for pixel (same project, so the same camera, light,
 //!   and assets).
 //! - `client_converges_under_latency_and_loss`: 100 ms one-way latency
-//!   with jitter and 10 % snapshot loss, the default snapshot rate and
-//!   interpolation delay; once the server's crates come to rest the
-//!   client's positions agree within 1e-3.
+//!   with jitter and 10 % snapshot loss, the default snapshot rate,
+//!   delta snapshots, and interpolation delay; once the server's crates
+//!   come to rest the client's positions agree within 1e-3.
 
 mod common;
 
@@ -168,29 +170,43 @@ fn client_matches_server_after_120_ticks() -> anyhow::Result<()> {
         want.iter().all(|row| row["net_id"].is_u64()),
         "every server entity has been captured"
     );
-    // Snapshots carry rotations as Euler degrees rounded to 1e-4
-    // (`TransformDesc`), so the client's rotation is the server's to
-    // within that; every other field must match exactly.
+    // Snapshots pack rotations into 7 bytes (`NetTransform`, within
+    // 0.004°), so the client's rotation is the server's to within that,
+    // compared by angle; every other field must match exactly.
     assert_eq!(got.len(), want.len());
     for (ours, theirs) in got.iter().zip(&want) {
         let (mut ours, mut theirs) = (ours.clone(), theirs.clone());
         let a = take_rotation(&mut ours);
         let b = take_rotation(&mut theirs);
         assert_eq!(ours, theirs);
-        for (x, y) in a.iter().zip(b) {
-            assert!(
-                (x - y).abs() <= ROTATION_QUANTUM,
-                "{}: rotation {a:?} vs {b:?}",
-                theirs["name"]
-            );
-        }
+        let angle = rotation_angle_deg(a, b);
+        assert!(
+            angle <= ROTATION_TOLERANCE,
+            "{}: rotation {a:?} vs {b:?}, {angle}° apart",
+            theirs["name"]
+        );
     }
     Ok(())
 }
 
-/// How finely snapshots round rotations, in degrees, with a little slack
-/// for `f32`.
-const ROTATION_QUANTUM: f64 = 1.1e-4;
+/// How far apart server and client rotations may be, in degrees: the
+/// wire precision (0.004°) with room for `f32` Euler round trips.
+const ROTATION_TOLERANCE: f64 = 0.01;
+
+/// The angle in degrees between two rotations given as intrinsic XYZ
+/// Euler angles in degrees, in `f64`.
+fn rotation_angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let quat = |[x, y, z]: [f64; 3]| {
+        glam::DQuat::from_euler(
+            glam::EulerRot::XYZ,
+            x.to_radians(),
+            y.to_radians(),
+            z.to_radians(),
+        )
+    };
+    let d = quat(a).inverse() * quat(b);
+    (2.0 * d.xyz().length().atan2(d.w.abs())).to_degrees()
+}
 
 /// Removes `rotation_euler_deg` from an `entity.list` row and returns it.
 fn take_rotation(row: &mut Value) -> [f64; 3] {

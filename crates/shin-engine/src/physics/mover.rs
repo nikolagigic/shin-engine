@@ -364,6 +364,7 @@ mod tests {
         let frame = InputFrame {
             tick: 3,
             actions: vec![("jump".into(), held(1.0)), ("move_x".into(), held(-0.5))],
+            ack: None,
         };
         let want = MoveInput {
             x: -0.5,

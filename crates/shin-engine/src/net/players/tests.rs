@@ -39,6 +39,7 @@ fn frame(tick: u64, actions: &[(&str, ActionValue)]) -> InputFrame {
             .iter()
             .map(|(name, value)| (name.to_string(), *value))
             .collect(),
+        ack: None,
     }
 }
 

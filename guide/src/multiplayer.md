@@ -106,9 +106,10 @@ code without a source is not sent (the server logs a warning).
 
 When an entity is despawned on the server, or loses `Replicated`, the
 next snapshot lists it as removed and clients despawn it with its
-children. A snapshot never despawns entities it does not mention, so a
-client's own entities (such as the level it loads from the entry scene)
-stay as they are.
+children. If the snapshot saying so is lost, the next full snapshot
+catches up (see [Bandwidth](#bandwidth)). Snapshots never despawn
+entities the server never sent, so a client's own entities (such as the
+level it loads from the entry scene) stay as they are.
 
 ## Hosting
 
@@ -152,7 +153,8 @@ tick, and the timestep, or turns it away if its protocol version
 differs), forgets players who left or disconnected, and takes in the
 input every player sent. **Then** your systems and scripts run, seeing
 this tick's players and input. **Last**, on every third tick, it
-captures the replicated entities and sends the snapshot to every player.
+captures the replicated entities and sends the snapshot to every player,
+as a delta of what changed where it can (see [Bandwidth](#bandwidth)).
 When a dedicated server stops on its own, it says goodbye to every
 player first.
 
@@ -441,7 +443,25 @@ game:
   through `server.rhai`, `input.set` drives that player's actions, and
   `sim.step` and `render.frame` show the result.
 - `net.status` reports the engine's multiplayer role. The engine behind
-  `--mcp` plays solo, so it reports `{ "role": "none" }`.
+  `--mcp` plays solo, so it reports `{ "role": "none" }`. A server
+  (`--serve` or `--host`) reports its tick, the number of players, and
+  the snapshot traffic to all remote players over the last second: what
+  full snapshots would have cost (before), what was actually sent
+  (after), and how many times smaller that is (`null` until something
+  has been sent):
+
+  ```json
+  {
+    "role": "server",
+    "tick": 5400,
+    "players": 2,
+    "bandwidth": {
+      "full_bytes_per_s": 3190960.0,
+      "sent_bytes_per_s": 172400.0,
+      "compression_ratio": 18.5
+    }
+  }
+  ```
 
 The `shin-multiplayer` [agent skill](agents-skills.md) walks an agent
 through it: checking replication under `--mcp`, hosting and joining as
@@ -450,17 +470,49 @@ that shows something different from the server.
 
 ## Bandwidth
 
-Every snapshot carries every replicated entity in full. A typical prop
-(a name, a transform, a mesh source such as `builtin://cube`, and a
-colour) takes about 84 bytes, so:
+The server sends each client **deltas**: only the entities that changed
+since the newest snapshot that client has acknowledged, plus the ones
+removed since. A client acknowledges in every input it sends, and
+rebuilds the full picture by applying the delta to the snapshot it
+holds. An entity that moved, turned, or changed anything else is sent
+whole; one that stood still costs nothing.
 
-| Replicated entities | Bytes per snapshot | Per client at 20 snapshots/s |
-|--------------------:|-------------------:|-----------------------------:|
-| 100                 | 8,298              | about 166 KB/s               |
-| 1000                | 84,773             | about 1.7 MB/s               |
+A client gets a **full** snapshot instead when it joins, when the
+snapshot it acknowledged is older than the server keeps, and at least
+once a second (every 60 ticks; `ServerOptions::full_snapshot_every`
+changes it, and `1` turns deltas off). Lost deltas therefore never leave
+a client wrong for long: the next full snapshot lists everything, and
+the client despawns whatever replicated entity it still shows that the
+full snapshot lacks.
+
+A typical prop (a name, a transform, a mesh source such as
+`builtin://cube`, and a colour) takes about 80 bytes in a full snapshot:
+
+| Replicated entities | Bytes per full snapshot | Per client at 20 snapshots/s |
+|--------------------:|------------------------:|-----------------------------:|
+| 100                 | 7,900                   | about 158 KB/s               |
+| 1000                | 80,775                  | about 1.6 MB/s               |
+
+With deltas, what counts is how much moves. With 1000 props of which 5 %
+move every tick, a delta is 4,044 bytes against 80,773 for the full
+snapshot: **20 times smaller**, about 80 KB/s per client instead of
+1.6 MB/s. A scene at rest costs a few bytes per snapshot, plus the full
+snapshot once a second. On a running server, `net.status` reports the
+live numbers (see [Tools](#tools)).
+
+Positions and scales travel as 32-bit floats, exactly. Rotations travel
+as "smallest three" quaternions in 7 bytes (against 12 for three Euler
+angles): the largest component is dropped and the other three are stored
+in 16 bits each. A rotation arrives within **0.004°** of the server's
+(the worst case measured over a million random rotations is 0.0037°);
+the identity and quarter turns about one axis arrive exactly. That is
+below what a pixel shows: in the engine's tests the client's frame
+matches the server's pixel for pixel.
 
 Shorter names and mesh sources make entities smaller; a child entity
-adds a few bytes for its parent. The numbers come from
+adds a few bytes for its parent. A snapshot too big for one datagram
+(about 1200 bytes) travels on the reliable stream; most deltas fit in
+one. The numbers come from
 `cargo bench -p shin-engine --bench net_snapshot`, which also times
 encoding and decoding (tens of microseconds for 1000 entities).
 
@@ -472,8 +524,6 @@ What multiplayer does not do yet:
   it walks with a mover; anything else that moves it arrives with the
   server's snapshot, a round trip late. There is no lag compensation for
   hits, and other players' entities are never predicted.
-- **Full snapshots only.** Every snapshot sends every replicated entity;
-  delta snapshots that send only changes are not implemented.
 - **No hosting or joining from the editor or through tools.** Servers
   and clients are started from the command line; `net.status` reports no
   session for an engine driven over MCP.

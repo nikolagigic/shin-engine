@@ -203,6 +203,7 @@ pub(crate) fn input_frame(tick: u64, actions: Option<&Actions>) -> InputFrame {
             .filter(|(_, _, value)| !at_rest(value))
             .map(|(name, _, value)| (name.to_string(), value))
             .collect(),
+        ack: None,
     }
 }
 
