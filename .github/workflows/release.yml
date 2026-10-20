@@ -84,9 +84,9 @@ jobs:
           test "v$version" = "$GITHUB_REF_NAME" \
             || { echo "tag $GITHUB_REF_NAME does not match the workspace version $version"; exit 1; }
       # Cargo publishes the -p packages in dependency order (shin-engine
-      # first; shin-mcp, shin-net, shin-cli, and shin-editor depend only on it) and
-      # waits for each to reach the index before publishing the crates
-      # that depend on it.
+      # first; shin-mcp, shin-net, and shin-cli depend only on it, and
+      # shin-editor on it and shin-net) and waits for each to reach the
+      # index before publishing the crates that depend on it.
       - name: cargo publish
         run: cargo publish --locked -p shin-engine -p shin-mcp -p shin-net -p shin-cli -p shin-editor
         env:

@@ -19,19 +19,26 @@ Shin is open source and written end-to-end in Rust. The crates.io package is
 
 The goal is an MVP that proves one architecture, not a feature list:
 
-- **wgpu** renderer (Metal / Vulkan / DX12 / WebGPU from one code path)
+- **wgpu** renderer (Metal / Vulkan / DX12 from one code path; desktop
+  only, a web build is not planned)
 - **winit** windowing and input
 - **glam** math, **hecs** entity-component-system
 - glTF meshes, instanced rendering, a fixed-timestep game loop
 - Headless golden-image render tests so correctness is checked, not eyeballed
 - An engine-native tool registry exposed over **MCP** (`shin-mcp`), so
   agents can build scenes, step the simulation, and look at rendered frames
+- An egui editor, RON scene files, Rhai scripting with hot reload, physics
+  (rapier3d), audio (kira), and input actions for keyboard, mouse, and
+  gamepad
+- **Multiplayer**: server-authoritative snapshot replication over QUIC
+  (`shin-net`), with local-player prediction and delta snapshots; every
+  new project can `--serve`, `--host`, or `--join`
 
 ## Documentation
 
 The user guide is at <https://nikolagigic.github.io/shin-engine/>: getting
-started, projects, the editor, scenes, scripting, physics, agents and MCP, and a
-tools reference generated from the engine's tool registry. Its source is
+started, projects, the editor, scenes, scripting, physics, audio, multiplayer,
+agents and MCP, and a tools reference generated from the engine's tool registry. Its source is
 the mdBook in [`guide/`](guide/); build it locally with `mdbook build
 guide`.
 
@@ -119,7 +126,8 @@ crates/shin-engine/   the engine library (package `shin-engine`, lib `shin`)
   tests/              integration + golden-image tests
 crates/shin-mcp/      MCP server (stdio) over the engine's tool registry
 crates/shin-net/      QUIC network transport for multiplayer (quinn)
-crates/shin-cli/      the `shin` command-line tool (`shin new`)
+crates/shin-cli/      the `shin` command-line tool (`shin new`, `shin edit`, `shin serve`)
+crates/shin-editor/   the egui editor
 ```
 
 ## Using the engine from an agent

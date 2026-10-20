@@ -251,8 +251,8 @@ pub enum EngineDep {
     /// The published crates on crates.io, the default: `version` is a Cargo
     /// version requirement, [`ENGINE_VERSION`] unless chosen otherwise.
     CratesIo {
-        /// Version requirement, e.g. `"0.1.0"` (which allows any `0.1.x`
-        /// from `0.1.0` up).
+        /// Version requirement, e.g. `"0.2.0"` (which allows any `0.2.x`
+        /// from `0.2.0` up).
         version: String,
     },
     /// A git repository, e.g. [`ENGINE_GIT_URL`].
