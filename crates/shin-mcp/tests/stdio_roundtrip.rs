@@ -27,6 +27,16 @@ fn stdio_roundtrip() {
         .collect();
     assert!(names.contains(&"engine.info"), "{names:?}");
     assert!(names.contains(&"engine.list_tools"), "{names:?}");
+    // GE-046: the multiplayer tools.
+    for net in [
+        "net.host",
+        "net.join",
+        "net.disconnect",
+        "net.status",
+        "net.players",
+    ] {
+        assert!(names.contains(&net), "{net} in {names:?}");
+    }
 
     let unknown = server.request(
         3,

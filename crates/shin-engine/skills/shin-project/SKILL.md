@@ -73,6 +73,14 @@ and loads the entry scene. `project.info` (no arguments) re-reads
 Call `engine.info` and `engine.list_tools` to see what the connected
 server offers; a game under `--mcp` lists its `game.*` tools too.
 
+Multiplayer through tools: `net.host` with `{"port": 7777}` makes the
+engine a listen server and starts play; `net.join` with `{"addr":
+"127.0.0.1:7777"}` joins one (add `"insecure": true` without the
+server's certificate); `net.status` reports the role, tick, players with
+round-trip times, and bytes per second; `net.players` lists the players;
+`net.disconnect` (or `sim.stop`) ends the session. They need a network
+installed (the editor has QUIC); without one they say so.
+
 ## Add a project tool
 
 Game tools live in `register_game_tools` in `src/main.rs`; the starter

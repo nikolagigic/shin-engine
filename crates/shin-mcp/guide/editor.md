@@ -20,7 +20,9 @@ editor, for example `shin edit mygame -- --screenshot out.png`.
 
 ## Panels and the View menu
 
-The window opens at 1600 × 900 with seven docked panels:
+The window opens at 1600 × 900 with eight docked panels and a status
+bar along the bottom that shows the [multiplayer](#multiplayer)
+connection state:
 
 | Panel         | Where      | Shows |
 |---------------|------------|-------|
@@ -29,6 +31,7 @@ The window opens at 1600 × 900 with seven docked panels:
 | **Assets**    | left, bottom | The project's meshes, textures, scenes, and scripts, with a button per entry to use it, and an Import row. |
 | **Inspector** | right, top | The selected entity's properties, editable, and the scene camera. |
 | **History**   | right, bottom | The command history: undoable edits oldest first as `tool {args}`, then undone edits greyed out. |
+| **Multiplayer** | right, bottom (a tab beside History) | Host on Play, Join, the players with their round-trip times, and a bandwidth sparkline. See [Multiplayer](#multiplayer). |
 | **Log**       | bottom, left | The engine's log lines, newest at the bottom. |
 | **Console**   | bottom, right | A one-line prompt that runs tools. |
 
@@ -368,6 +371,39 @@ script from [Scripting](scripting.md) to it, or start the editor with
 `--demo-orbit`, which registers a stand-in system that moves the entity
 named `moon` on a circle of radius 1.6 at height 0.5, one radian per
 simulated second, like the starter game does.
+
+## Multiplayer
+
+The editor plays as a [multiplayer](multiplayer.md) server. Without
+hosting, Play is solo, as the game run alone is: the server is yours
+alone, so the project's `scripts/server.rhai` greets you as player 1 (in
+a new project, a cube of your own appears).
+
+The **Multiplayer** panel (a tab beside History):
+
+- **Host on Play** and a **port** (default 7777): with the box ticked,
+  Play hosts a session (`net.host`) instead. The editor is the server:
+  run the game in another terminal with `cargo run -- --join
+  127.0.0.1:7777 --cert target/shin-server-cert.der` (the editor saves
+  the certificate there in the project) and it sees the editor's world,
+  with a cube of its own that its keys move.
+- An address and **Join**: joins another server (`net.join`) and starts
+  playing as its client; the server's replicated entities appear in the
+  viewport. Without **Trust any server**, Join trusts the certificate a
+  host in this project saved; tick it to join a server whose certificate
+  you do not have (development only).
+- While in a session: the players with their round-trip times (`(you)`
+  marks your own), bytes in and out per second, and a sparkline of the
+  bytes per tick over the last second.
+
+The status bar says `Offline`, `Hosting on port 7777 · 1 joined · tick
+…`, `Joining …`, `Connected to … as player 2, 1 ms`, or why the
+connection closed. **Stop** ends hosting or leaves the server, then
+restores the scene as usual; the editor is solo again. The panel's
+controls are greyed out while playing, so a session starts from editing.
+
+These are the `net.*` tools, so `net.status` in the Console shows the
+same numbers.
 
 ## Screenshots
 

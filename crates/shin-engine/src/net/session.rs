@@ -8,7 +8,7 @@
 //!
 //! A session replaces whatever [`NetServer`] the engine had (a solo game's
 //! [`NetServer::solo`]) and puts it back when it ends. It ends with
-//! [`end`]: `net.disconnect`, or stopping play ([`Headless::stop`]), so
+//! `net.disconnect`, or by stopping play ([`Headless::stop`]), so
 //! Stop in the editor ends hosting or leaves the server.
 
 use std::collections::VecDeque;

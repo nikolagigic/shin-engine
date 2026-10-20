@@ -67,12 +67,18 @@ fn host_and_join_over_quic() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-    host.step(2);
-    let status = call(&reg, &mut host, "net.status", json!({}));
-    assert!(
-        status["bytes_out_per_s"].as_f64().unwrap() > 0.0,
-        "{status}"
-    );
+    // quinn counts UDP bytes as its driver sends them, a moment after the
+    // tick queued them, so wait for the count to show.
+    let start = Instant::now();
+    loop {
+        host.step(1);
+        let status = call(&reg, &mut host, "net.status", json!({}));
+        if status["bytes_out_per_s"].as_f64().unwrap() > 0.0 {
+            break;
+        }
+        assert!(start.elapsed() < DEADLINE, "no bytes counted: {status}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     reg.call(&mut client, "sim.stop", json!({}))?;
     reg.call(&mut host, "sim.stop", json!({}))?;

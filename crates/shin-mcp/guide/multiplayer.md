@@ -382,12 +382,49 @@ encoding and decoding (tens of microseconds for 1000 entities).
 
 ## Tools
 
-`net.status` reports the engine's multiplayer role. Today that is always
-`{ "role": "none" }`.
+Agents, the editor, and the Console host and join through the same
+tools. None of them is recorded in the command history: hosting and
+joining are not edits.
+
+| Tool             | Does |
+|------------------|------|
+| `net.host`       | Starts hosting on this engine: `{ "port": 7777, "snapshot_every": 3 }` (both optional; port `0` picks a free one). The engine becomes a listen server with its own local player, and play mode starts as with `sim.play`. The certificate is saved to `target/shin-server-cert.der` in the project. |
+| `net.join`       | Joins the server at `{ "addr": "host:port" }` as a client and starts play mode. Trust: `"insecure": true` accepts any server (development only), `"cert_path"` trusts that certificate file, and with neither the project's `target/shin-server-cert.der` (what a host on this machine saved) is trusted. Optional `"name"` is the player name the server logs. |
+| `net.disconnect` | Ends the session: a host says goodbye to every player, a client leaves and its replicated entities are removed. Play continues. |
+| `net.status`     | `role` (`none`, `host`, or `client`) and, in a session, `tick`, `players` (each `{ id, rtt_ms }`), `bytes_in_per_s`, `bytes_out_per_s`, and `bandwidth` (bytes in plus out per tick over the last second). |
+| `net.players`    | Every player this engine knows of, each `{ id, local, rtt_ms }`. |
+
+`sim.stop` (and the editor's Stop) also ends the session, so stopping
+always leaves the engine with `net.status` at `{ "role": "none" }`.
+
+`players` in `net.status` are the players connected over the network: on
+a host, every client that joined (its own player is `local_player`); on a
+client, itself once welcomed (`player`, with `state` going from
+`connecting` to `connected`, or `disconnected` with a `reason`).
+`net.players` on a host also lists its own player. Round-trip times come
+from QUIC's estimate (`null` on a transport that does not measure one).
+
+```text
+net.host {"port": 7777}
+net.status
+→ {"role": "host", "port": 7777, "tick": 120, "local_player": 1,
+   "players": [{"id": 2, "rtt_ms": 0.4}], "bytes_out_per_s": 9120.0, ...}
+```
+
+Hosting and joining need a network to make transports: the
+`shin::net::Networking` resource. The editor installs QUIC
+(`shin_net::QuicNetwork`); without one, `net.host` and `net.join` fail
+and say so. A game that wants the tools under `--mcp` inserts it too:
+
+```rust,ignore
+engine.resources.insert(shin::net::Networking(Box::new(shin_net::QuicNetwork)));
+```
+
+Tests use `shin::net::LoopbackNetwork`, an in-process network where a
+server listens on a port and clients connect to it at any time; clone it
+into two engines and one can host while the other joins.
 
 ## Coming in this milestone
 
-- Host and Join in the editor, and `net.*` tools to host, join, and
-  inspect a session.
 - Client-side prediction for the player's own entity.
 - Delta snapshots that send only what changed.
