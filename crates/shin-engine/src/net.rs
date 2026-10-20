@@ -12,12 +12,15 @@
 //! - [`snapshot`]: [`capture`] turns the replicated entities into a
 //!   [`Snapshot`]; [`apply`] spawns, updates, and despawns entities from
 //!   one.
+//! - [`server`]: the authority (GE-041): [`NetServer`],
+//!   [`net_server_system`], and [`run_server`] for a dedicated server.
 //! - [`transport`]: the synchronous, polled [`Transport`] trait and
 //!   [`LoopbackTransport`], an in-process implementation for tests.
 //!
 //! Tools: [`register_tools`] adds `net.status`.
 
 pub mod protocol;
+pub mod server;
 pub mod snapshot;
 pub mod transport;
 
@@ -32,6 +35,7 @@ use crate::ecs::Entity;
 pub use protocol::{
     EntitySnap, InputFrame, Message, PROTOCOL_VERSION, Snapshot, decode, encode, reject_version,
 };
+pub use server::{NetServer, ServerOptions, net_server_system, run_server};
 pub use snapshot::{apply, capture};
 pub use tools::register_tools;
 pub use transport::{Channel, Event, LoopbackTransport, PeerId, Transport};

@@ -3,6 +3,7 @@
 //! ```text
 //! shin new <name> [--dir <path>] [--engine-path <path>]
 //! shin edit <dir> [-- <editor args>...]
+//! shin serve <dir> [--port <port>]
 //! shin docs tools
 //! ```
 //!
@@ -14,6 +15,10 @@
 //! `shin-editor` binary: the one named by `$SHIN_EDITOR`, else the one next
 //! to `shin`, else the one on `PATH`. Arguments after `--` are passed on
 //! (for example `-- --screenshot out.png`).
+//!
+//! `shin serve` runs the project in `<dir>` as a dedicated multiplayer
+//! server: `cargo run -- --serve [--port <port>]` in that directory,
+//! because the game's systems live in the project's own binary (GE-041).
 //!
 //! `shin docs tools` prints the user guide's tools reference (GE-029) as
 //! Markdown, generated from the engine's tool registry; see [`docs`].
@@ -59,6 +64,15 @@ enum Command {
         /// Extra arguments for `shin-editor`, after `--`.
         #[arg(last = true)]
         editor_args: Vec<OsString>,
+    },
+    /// Run the project in `<dir>` as a dedicated multiplayer server
+    /// (`cargo run -- --serve` there). Ctrl-C stops it.
+    Serve {
+        /// The project directory (the one containing `shin.toml`).
+        dir: PathBuf,
+        /// The port to serve on; the game's default (7777) if omitted.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Print generated documentation for the user guide (`guide/`).
     Docs {
@@ -112,6 +126,32 @@ fn edit(dir: &Path, extra: &[OsString]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The `cargo run -- --serve` command for the project in `dir`, with
+/// `--port` if one is given.
+fn serve_command(dir: &Path, port: Option<u16>) -> Process {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Process::new(cargo);
+    cmd.current_dir(dir).args(["run", "--", "--serve"]);
+    if let Some(port) = port {
+        cmd.arg("--port").arg(port.to_string());
+    }
+    cmd
+}
+
+/// Runs the project in `dir` in serve mode and waits for it.
+fn serve(dir: &Path, port: Option<u16>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        dir.join("shin.toml").is_file(),
+        "{} is not a Shin project (no shin.toml)",
+        dir.display()
+    );
+    let status = serve_command(dir, port)
+        .status()
+        .context("could not run `cargo`; is it on PATH?")?;
+    anyhow::ensure!(status.success(), "the server exited with {status}");
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
@@ -136,6 +176,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Edit { dir, editor_args } => edit(&dir, &editor_args)?,
+        Command::Serve { dir, port } => serve(&dir, port)?,
         Command::Docs { what: Docs::Tools } => print!("{}", docs::tools_markdown()),
     }
     Ok(())
@@ -144,6 +185,23 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_runs_the_projects_serve_mode() {
+        let cmd = serve_command(Path::new("/games/demo"), None);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/games/demo")));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["run", "--", "--serve"]);
+        let cmd = serve_command(Path::new("."), Some(9000));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["run", "--", "--serve", "--port", "9000"]);
+    }
+
+    #[test]
+    fn serve_needs_a_project() {
+        let err = serve(Path::new("/definitely/not/here"), None).unwrap_err();
+        assert!(err.to_string().contains("shin.toml"), "{err}");
+    }
 
     #[test]
     fn env_override_wins() {

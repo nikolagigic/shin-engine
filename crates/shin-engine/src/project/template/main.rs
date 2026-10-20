@@ -4,12 +4,16 @@
 //! size come from `shin.toml`; the scene is `scenes/main.scene.ron`.
 //!
 //! ```text
-//! cargo run            play in a window
-//! cargo run -- --mcp   serve this game to an agent over MCP (stdio)
+//! cargo run                         play in a window
+//! cargo run -- --mcp                serve this game to an agent over MCP (stdio)
+//! cargo run -- --serve [--port N]   run a dedicated multiplayer server, no window
+//! cargo run -- --host [--port N]    play in a window and host a multiplayer game
 //! ```
 //!
-//! Both modes build the same world, systems ([`game_schedule`]), and
-//! resources, so whatever an agent sees under `--mcp` is the game itself.
+//! Every mode builds the same world, systems ([`game_schedule`]), and
+//! resources, so whatever an agent sees under `--mcp`, and whatever a
+//! server simulates, is the game itself. The server's port defaults to
+//! [`DEFAULT_PORT`].
 //! The moon's script (`scripts/moon.rhai`) blips once per revolution.
 //!
 //! Controls: the arrow keys or a gamepad's left stick move the cube and
@@ -29,6 +33,7 @@ use shin::gpu::GpuContext;
 use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
+use shin::net::{LoopbackTransport, NetServer, ServerOptions, net_server_system};
 use shin::physics::physics_system;
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
@@ -38,6 +43,10 @@ use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
+
+/// The UDP port `--serve` and `--host` listen on unless `--port` says
+/// otherwise.
+const DEFAULT_PORT: u16 = 7777;
 
 /// Linear clear colour: a dusky sky blue.
 const SKY: wgpu::Color = wgpu::Color {
@@ -150,6 +159,35 @@ fn serve_mcp(project: Project) -> anyhow::Result<()> {
     })
 }
 
+/// The network transport a server listens on.
+///
+/// No network transport is built into the engine yet, so this is an
+/// in-process loopback with no clients: the server runs and simulates,
+/// but nobody can connect from another process. The real transport
+/// replaces this function's body.
+fn server_transport(port: u16) -> Box<LoopbackTransport> {
+    log::warn!(
+        "no network transport is built yet: serving on an in-process loopback, \
+         so port {port} is not opened and no remote client can join"
+    );
+    Box::new(LoopbackTransport::pair(0).0)
+}
+
+/// Runs a dedicated server: the game's schedule on a headless engine with
+/// the project open, stepped at the fixed rate until Ctrl-C.
+fn serve(project: Project, port: u16) -> anyhow::Result<()> {
+    let size = (project.window.width, project.window.height);
+    let mut resources = Resources::new();
+    add_game_resources(&mut resources);
+    let mut engine = Headless::from_parts(World::new(), resources, game_schedule(), size)?;
+    engine.load_project(Path::new(ROOT))?;
+    log::info!(
+        "serving `{}` on port {port}; press Ctrl-C to stop",
+        project.name
+    );
+    shin::net::run_server(&mut engine, server_transport(port), ServerOptions::default())
+}
+
 /// First-frame setup in the window: the renderer for the window's colour
 /// format, the project's assets, the entry scene, and a fly camera facing
 /// the way the scene's camera does.
@@ -178,10 +216,24 @@ fn load_scene(
 /// scripts read them with `action_pressed` and friends, and so can your
 /// systems with `res.expect::<Actions>()`. Under `--mcp`,
 /// [`Headless::load_project`] installs them for `input.set`.
-fn run_window(project: Project) -> anyhow::Result<()> {
+///
+/// With `host` set to a port, the window is also a listen server: a
+/// [`NetServer`] runs in the same engine, last in the fixed schedule, and
+/// the person at the window is its local player one.
+fn run_window(project: Project, host: Option<u16>) -> anyhow::Result<()> {
     let mut schedule = game_schedule();
     schedule.add_frame("fly_camera", fly_camera_system);
+    if host.is_some() {
+        schedule.add_fixed("net_server", net_server_system);
+    }
     let mut game = EcsGame::new(World::new(), schedule);
+    if let Some(port) = host {
+        let opts = ServerOptions::default();
+        let mut server = NetServer::new(server_transport(port), opts.snapshot_every);
+        server.add_local_player();
+        game.resources.insert(server);
+        log::info!("hosting `{}` on port {port}", project.name);
+    }
     game.title = project.window.title.clone();
     add_game_resources(&mut game.resources);
     game.resources.insert(FlyCamera::default());
@@ -218,9 +270,43 @@ fn main() -> anyhow::Result<()> {
 
     let project = Project::load(Path::new(ROOT))?;
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => run_window(project),
-        [flag] if flag == "--mcp" => serve_mcp(project),
-        _ => anyhow::bail!("usage: cargo run [-- --mcp]"),
+    match parse_mode(&args)? {
+        Mode::Window => run_window(project, None),
+        Mode::Mcp => serve_mcp(project),
+        Mode::Serve(port) => serve(project, port),
+        Mode::Host(port) => run_window(project, Some(port)),
+    }
+}
+
+/// How the game was asked to run.
+enum Mode {
+    /// Play in a window (no arguments).
+    Window,
+    /// `--mcp`: serve to an agent over stdio.
+    Mcp,
+    /// `--serve [--port N]`: a dedicated server on port `N`.
+    Serve(u16),
+    /// `--host [--port N]`: a window that is also a server on port `N`.
+    Host(u16),
+}
+
+/// Reads the command line (without the program name).
+fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
+    const USAGE: &str = "usage: cargo run [-- --mcp | --serve [--port N] | --host [--port N]]";
+    let port = |rest: &[String]| -> anyhow::Result<u16> {
+        match rest {
+            [] => Ok(DEFAULT_PORT),
+            [flag, n] if flag == "--port" => n
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--port needs a number from 0 to 65535, got `{n}`")),
+            _ => anyhow::bail!(USAGE),
+        }
+    };
+    match args {
+        [] => Ok(Mode::Window),
+        [flag] if flag == "--mcp" => Ok(Mode::Mcp),
+        [flag, rest @ ..] if flag == "--serve" => Ok(Mode::Serve(port(rest)?)),
+        [flag, rest @ ..] if flag == "--host" => Ok(Mode::Host(port(rest)?)),
+        _ => anyhow::bail!(USAGE),
     }
 }

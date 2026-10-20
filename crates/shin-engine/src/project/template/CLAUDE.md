@@ -11,6 +11,10 @@ capability is a named tool.
   to look, Escape quits).
 - `cargo run -- --mcp`: no window; serve this game over MCP on stdio, with
   its own systems and tools and this project open. Logs go to stderr.
+- `cargo run -- --serve [--port 7777]`: a dedicated multiplayer server
+  (no window) running the game's systems; Ctrl-C stops it. `--host`
+  instead plays in a window and serves from it. `shin serve .` runs
+  `--serve`.
 - `shin edit .`: open the project in the Shin editor.
 
 ## Agents

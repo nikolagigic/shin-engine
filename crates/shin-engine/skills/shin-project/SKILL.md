@@ -33,7 +33,7 @@ target folder must be missing or empty.
 ```text
 shin.toml              project name, window title and size, entry scene
 Cargo.toml             depends on shin-engine and shin-mcp
-src/main.rs            the game: systems, game tools, window and --mcp modes
+src/main.rs            the game: systems, game tools, window, --mcp, --serve, --host
 scenes/main.scene.ron  the entry scene, loaded on start
 scripts/               Rhai scripts: player.rhai (the cube), moon.rhai
 assets/                glTF meshes, textures, and sounds/blip.wav
@@ -59,6 +59,11 @@ and loads the entry scene. `project.info` (no arguments) re-reads
 - `cargo run -- --mcp`: no window; serves the game over MCP on stdio with
   its own systems and tools and the project open. `.mcp.json` does this
   for Claude Code; the first start compiles the game (about a minute).
+- `cargo run -- --serve [--port 7777]`: no window; a dedicated
+  multiplayer server running the game's systems at the fixed rate until
+  Ctrl-C (`shin serve .` does the same). `--host` plays in a window and
+  serves from it. No network transport is built yet, so no other process
+  can join.
 - `shin edit .`: opens the project in the editor.
 - `shin-mcp --project .`: the engine's own server on this project,
   without the game's systems or tools.
