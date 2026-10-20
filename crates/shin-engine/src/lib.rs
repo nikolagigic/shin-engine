@@ -20,6 +20,7 @@
 //! - [`script`] — Rhai gameplay scripts, `script.*`             (GE-011)
 //! - [`audio`]  — sound sources and one-shot playback, `audio.*` (GE-036)
 //! - [`physics`] — rapier3d rigid bodies and colliders, `physics.*` (GE-034)
+//! - [`net`]    — multiplayer core: ids, snapshots, transports, `net.*` (GE-040)
 //!
 //! The MCP server lives in the separate `shin-mcp` crate (GE-014) and is
 //! a thin transport over `tool::ToolRegistry` (GE-013). The engine lib never
@@ -36,6 +37,7 @@ pub mod gpu;
 pub mod headless;
 pub mod input;
 pub mod math;
+pub mod net;
 pub mod physics;
 pub mod project;
 pub mod render;
