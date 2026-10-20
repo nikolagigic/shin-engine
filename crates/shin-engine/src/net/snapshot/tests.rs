@@ -465,7 +465,7 @@ fn patch_refuses_a_delta_against_another_baseline() {
 #[test]
 fn deltas_are_ten_times_smaller_when_five_percent_move() {
     let prop = |i: u64, tick: u64| {
-        let moving = i % 20 == 0;
+        let moving = i.is_multiple_of(20);
         let f = i as f32;
         let slide = if moving { tick as f32 * 0.01 } else { 0.0 };
         EntitySnap {

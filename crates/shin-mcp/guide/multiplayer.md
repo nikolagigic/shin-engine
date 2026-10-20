@@ -72,7 +72,8 @@ each source from its own `assets/` directory.
 
 When an entity is despawned on the server, or loses `Replicated`, the next
 snapshot lists it as removed and clients despawn it together with its
-children. A snapshot never despawns entities it simply does not mention.
+children. Lost snapshots do not lose a removal: the next full snapshot
+resyncs (see [Bandwidth](#bandwidth)).
 
 ## Messages and transports
 
@@ -135,7 +136,8 @@ A server tick has two halves. **First**, before your systems, the server:
 Then your systems and scripts run, seeing this tick's players and input.
 **Last**, every third tick (ticks 0, 3, 6, ...: 20 snapshots a second),
 it captures the replicated entities and sends the snapshot to every
-player.
+player, as a delta of what changed where it can (see
+[Bandwidth](#bandwidth)).
 
 When a dedicated server stops on its own (a system sets `ExitRequest`),
 it sends every player a `Goodbye` first.
@@ -364,30 +366,76 @@ and `QuicTransport::connect(addr, &trust)` a client one, where `trust` is
 
 ## Bandwidth
 
-Every snapshot carries every replicated entity in full (delta snapshots
-are coming). A typical prop (a name, a transform, a mesh source such as
-`builtin://cube`, and a colour) takes about 84 bytes, so:
+The server sends each client **deltas**: only the entities that changed
+since the newest snapshot that client has acknowledged, plus the ones
+removed since. A client acknowledges in every input it sends, and
+rebuilds the full picture by applying the delta to the snapshot it
+holds. An entity that moved, turned, or changed anything else is sent
+whole; one that stood still costs nothing.
 
-| Replicated entities | Bytes per snapshot | Per client at 20 snapshots/s |
-|--------------------:|-------------------:|-----------------------------:|
-| 100                 | 8,298              | about 166 KB/s               |
-| 1000                | 84,773             | about 1.7 MB/s               |
+A client gets a **full** snapshot instead when it joins, when the
+snapshot it acknowledged is older than the server keeps, and at least
+once a second (every 60 ticks; `ServerOptions::full_snapshot_every`
+changes it, and `1` turns deltas off). Lost deltas therefore never leave
+a client wrong for long: the next full snapshot lists everything, and the
+client despawns whatever it still shows that the full snapshot lacks.
+
+A typical prop (a name, a transform, a mesh source such as
+`builtin://cube`, and a colour) takes about 80 bytes in a full snapshot:
+
+| Replicated entities | Bytes per full snapshot | Per client at 20 snapshots/s |
+|--------------------:|------------------------:|-----------------------------:|
+| 100                 | 7,799                   | about 156 KB/s               |
+| 1000                | 79,774                  | about 1.6 MB/s               |
+
+With deltas, what counts is how much moves. With 1000 props of which 5 %
+move every tick, a delta is 3,993 bytes against 79,772 for the full
+snapshot: **20 times smaller**, about 80 KB/s per client instead of
+1.6 MB/s. A scene at rest costs a few bytes per snapshot, plus the full
+snapshot once a second.
+
+Positions and scales travel as 32-bit floats, exactly. Rotations travel
+as "smallest three" quaternions in 7 bytes (against 12 for three Euler
+angles): the largest component is dropped and the other three are stored
+in 16 bits each. A rotation arrives within **0.004°** of the server's
+(the worst case measured over a million random rotations is 0.0037°);
+the identity and quarter turns about one axis arrive exactly. That is
+far below what a pixel can show: in the engine's own tests the client's
+frame matches the server's pixel for pixel.
 
 Shorter names and mesh sources make entities smaller; a child entity
 adds a few bytes for its parent. Snapshots bigger than one datagram (about
 1200 bytes) travel on the reliable stream (see
-[Over the network](#over-the-network)). The numbers come from
-`cargo bench -p shin-engine --bench net_snapshot`, which also times
-encoding and decoding (tens of microseconds for 1000 entities).
+[Over the network](#over-the-network)); most deltas fit in one. The
+numbers come from `cargo bench -p shin-engine --bench net_snapshot`,
+which also times encoding and decoding (tens of microseconds for 1000
+entities). On a running server, `net.status` reports the live numbers.
 
 ## Tools
 
-`net.status` reports the engine's multiplayer role. Today that is always
-`{ "role": "none" }`.
+`net.status` reports the engine's multiplayer role. An engine that is not
+networked reports `{ "role": "none" }`. A server reports its tick, the
+number of players, and the snapshot traffic to all remote players over
+the last second: what full snapshots would have cost (before), what was
+actually sent (after), and how many times smaller that is:
+
+```json
+{
+  "role": "server",
+  "tick": 5400,
+  "players": 2,
+  "bandwidth": {
+    "full_bytes_per_s": 3190960.0,
+    "sent_bytes_per_s": 172400.0,
+    "compression_ratio": 18.5
+  }
+}
+```
+
+`compression_ratio` is `null` until something has been sent.
 
 ## Coming in this milestone
 
 - Host and Join in the editor, and `net.*` tools to host, join, and
   inspect a session.
 - Client-side prediction for the player's own entity.
-- Delta snapshots that send only what changed.
