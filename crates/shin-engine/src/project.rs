@@ -873,6 +873,7 @@ mod tests {
                 ".claude/skills/shin-visual-debugging/SKILL.md",
                 ".claude/skills/shin-scripting/SKILL.md",
                 ".claude/skills/shin-project/SKILL.md",
+                ".claude/skills/shin-multiplayer/SKILL.md",
             ]
         );
         let claude = fs::read_to_string(dir.join("CLAUDE.md"))?;
