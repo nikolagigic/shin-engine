@@ -1,6 +1,8 @@
 //! The editor's UI: File, Edit, and View menus above an `egui_dock` area
-//! with seven panels: Viewport (centre), Scene and Assets (left), Inspector
-//! and History (right), and Log and Console (below the viewport).
+//! with eight panels: Viewport (centre), Scene and Assets (left), Inspector
+//! and History with Multiplayer (right), and Log and Console (below the
+//! viewport), and a status bar along the bottom with the multiplayer
+//! connection state ([`crate::multiplayer`], GE-046).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
 //! orbit-camera moves; a click selects the entity under the pointer and
@@ -51,6 +53,7 @@ use crate::edit::entity_id;
 use crate::gizmo::{self, Mode, Pointer, TransformGizmo};
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
+use crate::multiplayer::{self, Multiplayer, NetView};
 use crate::orbit::OrbitCamera;
 use crate::pick;
 
@@ -71,14 +74,17 @@ pub enum Tab {
     History,
     /// A one-line prompt that runs tools: `<tool.name> [json args]`.
     Console,
+    /// Hosting and joining multiplayer sessions (GE-046).
+    Multiplayer,
 }
 
 /// The panels the View menu can hide and show; the Viewport always stays.
-pub const CLOSEABLE_TABS: [Tab; 6] = [
+pub const CLOSEABLE_TABS: [Tab; 7] = [
     Tab::Scene,
     Tab::Assets,
     Tab::Inspector,
     Tab::History,
+    Tab::Multiplayer,
     Tab::Log,
     Tab::Console,
 ];
@@ -146,8 +152,12 @@ pub enum Action {
     Play,
     /// Toolbar Pause: toggle pause while playing.
     Pause,
-    /// Toolbar Stop: restore the scene from the play snapshot.
+    /// Toolbar Stop: end any multiplayer session and restore the scene
+    /// from the play snapshot.
     Stop,
+    /// Multiplayer panel Join: join the server at this `host:port` and
+    /// start playing (GE-046).
+    Join(String),
     /// Play the sound at this asset source once, as a preview (GE-036).
     PreviewSound(String),
     /// Inspector "View from scene camera": move the viewport's orbit camera
@@ -171,6 +181,7 @@ impl Action {
                 | Self::Play
                 | Self::Pause
                 | Self::Stop
+                | Self::Join(_)
                 | Self::ViewFromSceneCamera
                 | Self::PreviewSound(_)
         )
@@ -215,7 +226,8 @@ pub fn parse_console_line(line: &str) -> Result<(&str, Value), String> {
 }
 
 /// The initial layout: Scene takes the left 18% with Assets under it,
-/// Inspector the right 22% of what remains with History under it, and Log
+/// Inspector the right 22% of what remains with History (and the
+/// Multiplayer tab beside it) under it, and Log
 /// and Console share the bottom quarter under the Viewport side by side.
 ///
 /// An `egui_dock` split fraction is the share of the left (or top) child,
@@ -226,7 +238,8 @@ pub fn default_layout() -> DockState<Tab> {
     let [centre, scene] = surface.split_left(NodeIndex::root(), 0.18, vec![Tab::Scene]);
     let [_scene, _assets] = surface.split_below(scene, 0.5, vec![Tab::Assets]);
     let [centre, inspector] = surface.split_right(centre, 0.78, vec![Tab::Inspector]);
-    let [_inspector, _history] = surface.split_below(inspector, 0.55, vec![Tab::History]);
+    let [_inspector, _history] =
+        surface.split_below(inspector, 0.55, vec![Tab::History, Tab::Multiplayer]);
     let [_viewport, log] = surface.split_below(centre, 0.75, vec![Tab::Log]);
     let [_log, _console] = surface.split_right(log, 0.5, vec![Tab::Console]);
     dock
@@ -284,6 +297,10 @@ pub struct EditorUi<'a> {
     /// The scene file Save writes, relative to the project; shown in the
     /// File menu.
     pub scene_path: &'a str,
+    /// The Multiplayer panel's fields.
+    pub multiplayer: &'a mut Multiplayer,
+    /// What `net.status` and `net.players` reported this frame.
+    pub net: &'a NetView,
     /// What to run after the UI pass.
     pub actions: &'a mut Vec<Action>,
     /// Set when File > Quit is clicked.
@@ -324,6 +341,10 @@ impl EditorUi<'_> {
                 ui.separator();
                 self.toolbar(ui);
             });
+        });
+        egui::Panel::bottom("status_bar").show(ui, |ui| {
+            ui.label(multiplayer::status_text(&self.net.status))
+                .on_hover_text("Multiplayer connection state");
         });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -840,6 +861,10 @@ impl TabViewer for EditorUi<'_> {
             Tab::Log => self.log_ui(ui),
             Tab::History => self.history_ui(ui),
             Tab::Console => self.console_ui(ui),
+            Tab::Multiplayer => {
+                let playing = self.engine.play_state().is_playing();
+                multiplayer::panel_ui(ui, self.multiplayer, self.net, playing, self.actions);
+            }
         }
     }
 
@@ -855,7 +880,9 @@ impl TabViewer for EditorUi<'_> {
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
             Tab::Viewport | Tab::Log | Tab::Console => [false, false],
-            Tab::Scene | Tab::Assets | Tab::Inspector | Tab::History => [true, true],
+            Tab::Scene | Tab::Assets | Tab::Inspector | Tab::History | Tab::Multiplayer => {
+                [true, true]
+            }
         }
     }
 }
@@ -894,7 +921,7 @@ fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
         Tab::Scene | Tab::Assets => {
             surface.split_left(root, 0.18, vec![tab]);
         }
-        Tab::Inspector | Tab::History => {
+        Tab::Inspector | Tab::History | Tab::Multiplayer => {
             surface.split_right(root, 0.78, vec![tab]);
         }
         Tab::Log | Tab::Console | Tab::Viewport => {
@@ -918,6 +945,7 @@ mod tests {
             Tab::Log,
             Tab::History,
             Tab::Console,
+            Tab::Multiplayer,
         ] {
             assert!(dock.find_tab(&tab).is_some(), "{tab:?} is docked");
         }
