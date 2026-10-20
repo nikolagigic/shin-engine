@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use super::players::PlayerInputs;
 use super::protocol::{InputFrame, Message, reject_version};
 use super::snapshot::capture;
-use super::transport::{Channel, Event, LoopbackTransport, PeerId, Transport};
+use super::transport::{Channel, Event, LoopbackTransport, PeerId, Traffic, Transport};
 use super::{PlayerId, Snapshot};
 use crate::app::FixedTimestep;
 use crate::ecs::{ExitRequest, Resources, Time, World};
@@ -118,6 +118,24 @@ impl NetServer {
         let mut players: Vec<PlayerId> = self.players.values().copied().chain(self.local).collect();
         players.sort();
         players
+    }
+
+    /// The players connected over the network (everyone but the local
+    /// player), in id order, each with the transport's round-trip time to
+    /// it, if the transport measures one.
+    pub fn remote_players(&self) -> Vec<(PlayerId, Option<Duration>)> {
+        let mut players: Vec<(PlayerId, Option<Duration>)> = self
+            .players
+            .iter()
+            .map(|(&peer, &player)| (player, self.transport.rtt(peer)))
+            .collect();
+        players.sort_by_key(|&(player, _)| player);
+        players
+    }
+
+    /// Bytes the server's transport has sent and received so far.
+    pub fn traffic(&self) -> Traffic {
+        self.transport.traffic()
     }
 
     /// The tick the server is at: how many ticks it has run.

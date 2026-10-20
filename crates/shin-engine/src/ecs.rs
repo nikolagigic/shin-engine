@@ -80,6 +80,14 @@ impl Resources {
         self.map.insert(TypeId::of::<T>(), Box::new(value));
     }
 
+    /// Takes the value of type `T` out, if one was inserted.
+    pub fn remove<T: 'static>(&mut self) -> Option<T> {
+        self.map
+            .remove(&TypeId::of::<T>())
+            .and_then(|value| value.downcast().ok())
+            .map(|value| *value)
+    }
+
     /// The value of type `T`, if one was inserted.
     pub fn get<T: 'static>(&self) -> Option<&T> {
         self.map
@@ -199,6 +207,22 @@ impl Schedule {
         self
     }
 
+    /// Puts `system` first in the fixed-step list.
+    pub fn prepend_fixed(&mut self, name: &'static str, system: System) -> &mut Self {
+        self.fixed.insert(0, (name, system));
+        self
+    }
+
+    /// Whether a fixed-step system named `name` is in the schedule.
+    pub fn has_fixed(&self, name: &str) -> bool {
+        self.fixed.iter().any(|(n, _)| *n == name)
+    }
+
+    /// Whether a per-frame system named `name` is in the schedule.
+    pub fn has_frame(&self, name: &str) -> bool {
+        self.frame.iter().any(|(n, _)| *n == name)
+    }
+
     /// Runs every fixed-step system once, in insertion order.
     pub fn run_fixed(&mut self, world: &mut World, res: &mut Resources) {
         run_all(&self.fixed, world, res);
@@ -243,6 +267,27 @@ mod tests {
 
         res.insert(Score(9));
         assert_eq!(res.expect::<Score>(), &Score(9), "insert replaces");
+    }
+
+    #[test]
+    fn remove_takes_the_resource_out() {
+        let mut res = Resources::new();
+        res.insert(Score(3));
+        assert_eq!(res.remove::<Score>(), Some(Score(3)));
+        assert_eq!(res.remove::<Score>(), None);
+    }
+
+    fn noop(_: &mut World, _: &mut Resources) {}
+
+    #[test]
+    fn prepend_and_has() {
+        let mut schedule = Schedule::new();
+        schedule.add_fixed("b", noop).prepend_fixed("a", noop);
+        schedule.add_frame("f", noop);
+        let names: Vec<_> = schedule.fixed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(schedule.has_fixed("a") && !schedule.has_fixed("f"));
+        assert!(schedule.has_frame("f") && !schedule.has_frame("a"));
     }
 
     #[test]

@@ -26,13 +26,14 @@
 //! sent.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use anyhow::Context as _;
 
 use super::players::{LocalPlayer, input_frame};
 use super::protocol::{Message, PROTOCOL_VERSION, Snapshot};
 use super::snapshot::apply;
-use super::transport::{Channel, Event, PeerId, Transport};
+use super::transport::{Channel, Event, PeerId, Traffic, Transport};
 use super::{NetId, NetIds, PlayerId};
 use crate::ecs::{Entity, Resources, Time, World};
 use crate::input::Actions;
@@ -249,6 +250,29 @@ impl NetClient {
     /// The received snapshots.
     pub fn buffer(&self) -> &SnapshotBuffer {
         &self.buffer
+    }
+
+    /// The round-trip time to the server, if connected and the transport
+    /// measures one.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.server.and_then(|server| self.transport.rtt(server))
+    }
+
+    /// Bytes the client's transport has sent and received so far.
+    pub fn traffic(&self) -> Traffic {
+        self.transport.traffic()
+    }
+
+    /// Leaves the session: tells the server with a [`Message::Goodbye`]
+    /// carrying `reason` and moves to [`ClientState::Disconnected`].
+    pub fn leave(&mut self, reason: &str) {
+        if let Some(server) = self.server {
+            let bye = Message::Goodbye {
+                reason: reason.to_string(),
+            };
+            self.transport.send(server, &bye, Channel::Reliable);
+        }
+        self.state = ClientState::Disconnected(reason.to_string());
     }
 
     /// Handles everything the transport received since the last tick.
