@@ -228,6 +228,7 @@ fn an_unreliable_message_too_big_for_a_datagram_still_arrives() {
             color: None,
             texture: None,
             owner: None,
+            mover: None,
         })
         .collect();
     let big = Message::Snapshot(Snapshot {
@@ -235,6 +236,7 @@ fn an_unreliable_message_too_big_for_a_datagram_still_arrives() {
         baseline: None,
         entities,
         removed: vec![],
+        last_input_ticks: Vec::new(),
     });
     assert!(
         shin::net::encode(&big).len() > 1500,

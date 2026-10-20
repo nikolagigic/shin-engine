@@ -5,8 +5,9 @@
 //!
 //! What is replicated per entity: its [`NetId`], parent link, [`Name`],
 //! [`Transform`], mesh, colour, and texture (by [`AssetSource`] string),
-//! and [`Owner`]. Scripts, sounds, and physics are not: they run on the
-//! server, and clients see their effect through the transforms.
+//! [`Owner`], and [`Mover`] (so a client can predict its own player,
+//! GE-048). Scripts, sounds, and physics are not: they run on the server,
+//! and clients see their effect through the transforms.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use crate::ecs::{
     world_transform,
 };
 use crate::math::Transform;
+use crate::physics::Mover;
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 
 /// Captures every entity with [`Replicated`] and a [`Transform`] at `tick`,
@@ -95,6 +97,7 @@ fn capture_with(
                 color,
                 texture,
                 owner: world.get::<&Owner>(entity).ok().map(|o| o.0),
+                mover: world.get::<&Mover>(entity).ok().map(|m| *m),
             }
         })
         .collect();
@@ -104,13 +107,16 @@ fn capture_with(
         baseline: None,
         entities,
         removed,
+        last_input_ticks: Vec::new(),
     }
 }
 
 /// The delta that turns full snapshot `base` into full snapshot `now`:
 /// tick `now.tick`, baseline `base.tick`, the entities of `now` that are
-/// not in `base` or whose [`EntitySnap`] differs, and in `removed` the
-/// entities of `base` that `now` lacks. [`patch`] undoes it.
+/// not in `base` or whose [`EntitySnap`] differs (any field, the
+/// [`crate::physics::Mover`] state included), in `removed` the entities
+/// of `base` that `now` lacks, and `now`'s `last_input_ticks` whole.
+/// [`patch`] undoes it.
 ///
 /// An entity that moved, turned, or changed anything else is sent whole;
 /// one that did not is not sent at all.
@@ -132,13 +138,14 @@ pub fn diff(base: &Snapshot, now: &Snapshot) -> Snapshot {
         baseline: Some(base.tick),
         entities,
         removed,
+        last_input_ticks: now.last_input_ticks.clone(),
     }
 }
 
 /// The full snapshot `delta` describes, given the full snapshot `base` it
 /// is relative to: `base`'s entities without `delta.removed`, with
 /// `delta.entities` added or replacing their namesakes, in [`NetId`]
-/// order. Keeps `delta`'s tick and `removed`.
+/// order. Keeps `delta`'s tick, `removed`, and `last_input_ticks`.
 ///
 /// Fails if `delta` is not a delta against `base` (its baseline is not
 /// `base.tick`).
@@ -163,6 +170,7 @@ pub fn patch(base: &Snapshot, delta: &Snapshot) -> anyhow::Result<Snapshot> {
         baseline: None,
         entities,
         removed: delta.removed.clone(),
+        last_input_ticks: delta.last_input_ticks.clone(),
     })
 }
 
@@ -301,6 +309,7 @@ fn apply_with(
         set(world, entity, Some(desc.transform.to_transform()))?;
         set(world, entity, desc.name.clone().map(Name))?;
         set(world, entity, desc.owner.map(Owner))?;
+        set(world, entity, desc.mover)?;
         let instance = draw.map(|(mesh, color, texture)| MeshInstance {
             mesh,
             color,

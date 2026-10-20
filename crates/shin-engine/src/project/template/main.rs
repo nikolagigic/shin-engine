@@ -20,12 +20,15 @@
 //! Every mode but `--join` is a server: playing alone (and under `--mcp`)
 //! the game is a server whose only player is you ([`NetServer::solo`]).
 //! So `scripts/server.rhai` gives every player, you included, a cube of
-//! their own, and `scripts/player.rhai` moves each cube with its owner's
-//! input. The moon's script (`scripts/moon.rhai`) blips once per
+//! their own that walks with its owner's input (a `Mover`), and
+//! `scripts/player.rhai` puts a cube that fell off the ground back on it.
+//! A client predicts its own cube, so it moves the moment you press a key
+//! (turn that off with `[net] predict = false` in `shin.toml`). The moon's
+//! script (`scripts/moon.rhai`) blips once per
 //! revolution.
 //!
 //! Controls: the arrow keys or a gamepad's left stick move your cube and
-//! Space or its south button lifts it (the `move_x`, `move_z`, and `jump`
+//! Space or its south button jumps (the `move_x`, `move_z`, and `jump`
 //! actions bound in `shin.toml`); W/S forward and back, A/D strafe, E/Q
 //! up and down fly the camera; hold the right mouse button to look
 //! around; Escape quits.
@@ -47,7 +50,7 @@ use shin::net::{
     NetClient, NetServer, ServerOptions, Transport, net_client_system, net_interpolate_system,
     net_server_input_system, net_server_system,
 };
-use shin::physics::physics_system;
+use shin::physics::{mover_system, physics_system};
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
 use shin::scene;
@@ -124,6 +127,7 @@ fn game_schedule() -> Schedule {
     schedule.add_fixed("net_server_input", net_server_input_system);
     schedule.add_fixed("orbit", orbit_system);
     schedule.add_fixed("script", script_system);
+    schedule.add_fixed("mover", mover_system);
     schedule.add_fixed("physics", physics_system);
     schedule.add_frame("audio", audio_system);
     schedule
@@ -296,7 +300,10 @@ fn load_scene(
 /// snapshot half last in the fixed schedule. With [`Net::Join`], it is a
 /// client: a [`NetClient`] joins the server, sends it this player's
 /// actions, applies its snapshots, and interpolates the entities it
-/// replicates; the server's entities are not simulated here.
+/// replicates; the server's entities are not simulated here, except this
+/// player's own cube, which the client moves ahead of the server and the
+/// server corrects (prediction, unless `shin.toml` says `[net] predict =
+/// false`). It lands on the ground this client loaded from the scene.
 fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
     let mut schedule = game_schedule();
     schedule.add_frame("fly_camera", fly_camera_system);
@@ -312,7 +319,8 @@ fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
         Net::Join(addr, trust) => {
             schedule.add_fixed("net_client", net_client_system);
             schedule.add_frame("net_interpolate", net_interpolate_system);
-            let client = NetClient::new(client_transport(&addr, &trust)?, &player_name());
+            let mut client = NetClient::new(client_transport(&addr, &trust)?, &player_name());
+            client.set_prediction(project.net.predict);
             log::info!("joining {addr}");
             (None, Some(client))
         }

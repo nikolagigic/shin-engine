@@ -27,7 +27,10 @@ draw what it sends and send back their player's input actions. A game
 played solo, and the game under `--mcp`, is a server whose only player
 is player 1, so the same scripts run everywhere. `scripts/server.rhai`
 spawns each player's entity in `on_player_join(id)` and removes it in
-`on_player_leave(id)`.
+`on_player_leave(id)`. Players walk with `.mover(speed, jump_impulse)`
+on that spawn: the client predicts its own walking entity (it moves at
+once, the server corrects it), while scripted movement arrives a round
+trip late. `[net] predict = false` in `shin.toml` turns prediction off.
 
 ## Steps
 
@@ -91,6 +94,7 @@ world. Report which entities are replicated and how you checked.
 | `net_id` is `null` | No snapshot taken yet, or not playing | `sim.play`, `sim.step` with `{"steps": 3}` |
 | Client sees no player entity | `server.rhai` has no `on_player_join`, or it fails | `script.errors`; read the server's log |
 | Player does not move | Action names in the script differ from `shin.toml` | `input.list`; fix the names |
+| Own player lags or snaps back on a client | Moved by a script, not a mover; or the client has no ground (movers land on its own static colliders) | `.mover(...)`; load the same scene on both sides |
 | Every player moves the same entity | The script reads one fixed player id | Read the owner's input: `player_input(entity.owner, "move_x")` in `player.rhai` |
 | Join fails with a certificate error | The server restarted with a new certificate | Use the new `target/shin-server-cert.der`, or `--insecure` |
 | Join times out after five seconds | Server not running, wrong port, or UDP blocked | Check the server log's port; open UDP in the firewall |

@@ -40,6 +40,7 @@ fn entity(i: u64, tick: u64, moving: bool) -> EntitySnap {
         color: Some([0.55, 0.38, 0.2, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
@@ -53,6 +54,7 @@ fn snapshot(count: u64, tick: u64, moving_every: u64) -> Snapshot {
             .map(|i| entity(i, tick, moving_every != 0 && i % moving_every == 0))
             .collect(),
         removed: Vec::new(),
+        last_input_ticks: Vec::new(),
     }
 }
 

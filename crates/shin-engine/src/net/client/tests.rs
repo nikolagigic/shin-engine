@@ -46,6 +46,7 @@ impl FakeServer {
             baseline: None,
             entities: entities.iter().map(|&(id, x)| at(id, x)).collect(),
             removed: removed.iter().copied().map(NetId).collect(),
+            last_input_ticks: Vec::new(),
         }));
     }
 }
@@ -61,6 +62,7 @@ fn at(id: u64, x: f32) -> EntitySnap {
         color: Some([1.0, 0.5, 0.25, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
@@ -379,6 +381,7 @@ impl FakeServer {
             baseline: None,
             entities: entities.iter().map(|&(id, x)| at(id, x)).collect(),
             removed: Vec::new(),
+            last_input_ticks: Vec::new(),
         };
         let delta = crate::net::diff(&full(base), &full(now));
         self.send(Message::Snapshot(delta));

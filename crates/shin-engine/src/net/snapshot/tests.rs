@@ -32,6 +32,7 @@ fn snap(id: u64, parent: Option<u64>, x: f32, mesh: Option<&str>) -> EntitySnap 
         color: mesh.map(|_| [0.5, 0.25, 1.0, 1.0]),
         texture: None,
         owner: None,
+        mover: None,
     }
 }
 
@@ -179,6 +180,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
             snap(6, Some(5), 2.0, None),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &first)?;
     let (root, child) = (
@@ -212,6 +214,7 @@ fn apply_spawns_then_updates_then_despawns() -> anyhow::Result<()> {
         baseline: None,
         entities: vec![snap(7, None, 0.0, None)],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &other)?;
     assert_eq!(client.world.len(), 3);
@@ -232,6 +235,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
             snap(4, None, 0.0, None),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &snapshot)?;
     assert_eq!(client.world.len(), 4);
@@ -241,6 +245,7 @@ fn removed_despawns_the_entity_and_its_children() -> anyhow::Result<()> {
         baseline: None,
         entities: vec![],
         removed: vec![NetId(1), NetId(99)],
+        last_input_ticks: Vec::new(),
     };
     apply_to(&mut client, &remove)?;
     assert_eq!(
@@ -268,6 +273,7 @@ fn applying_the_same_snapshot_twice_changes_nothing() -> anyhow::Result<()> {
             snap(1, None, 1.0, Some("builtin://cube")),
         ],
         removed: vec![NetId(50)],
+        last_input_ticks: Vec::new(),
     };
     let reg = ToolRegistry::with_engine_tools();
     apply_to(&mut client, &snapshot)?;
@@ -307,6 +313,7 @@ fn a_mesh_that_does_not_load_fails_and_changes_nothing() -> anyhow::Result<()> {
             snap(2, None, 0.0, Some("builtin://teapot")),
         ],
         removed: vec![],
+        last_input_ticks: Vec::new(),
     };
     let err = apply_to(&mut client, &snapshot).unwrap_err();
     assert!(format!("{err:#}").contains("builtin://teapot"), "{err:#}");
@@ -416,6 +423,7 @@ fn full(tick: u64, entities: &[(u64, f32)]) -> Snapshot {
             .map(|&(id, x)| snap(id, None, x, Some("builtin://cube")))
             .collect(),
         removed: Vec::new(),
+        last_input_ticks: Vec::new(),
     }
 }
 
@@ -446,6 +454,36 @@ fn patch_undoes_diff() -> anyhow::Result<()> {
         panic!("expected a snapshot");
     };
     assert_eq!(patch(&base, &received)?.entities, now.entities);
+    Ok(())
+}
+
+/// GE-048 fields: a change of [`crate::physics::Mover`] state alone sends
+/// the entity, and `last_input_ticks` travels whole on every delta.
+#[test]
+fn diff_sends_mover_changes_and_carries_last_input_ticks() -> anyhow::Result<()> {
+    let mut base = full(10, &[(1, 0.0), (2, 1.0)]);
+    base.entities[0].mover = Some(crate::physics::Mover::new(4.0, 5.0));
+    base.last_input_ticks = vec![(PlayerId(1), 30)];
+    let mut now = base.clone();
+    now.tick = 13;
+    if let Some(mover) = &mut now.entities[0].mover {
+        mover.vertical_velocity = -2.0; // falling: only its state changed
+    }
+    now.last_input_ticks = vec![(PlayerId(1), 33), (PlayerId(2), 7)];
+    let delta = diff(&base, &now);
+    let sent: Vec<u64> = delta.entities.iter().map(|e| e.id.0).collect();
+    assert_eq!(sent, [1]);
+    assert_eq!(delta.last_input_ticks, now.last_input_ticks);
+    let patched = patch(&base, &delta)?;
+    assert_eq!(patched.entities, now.entities);
+    assert_eq!(patched.last_input_ticks, now.last_input_ticks);
+    // Unchanged entities still carry the newest input ticks.
+    let mut later = now.clone();
+    later.tick = 16;
+    later.last_input_ticks = vec![(PlayerId(1), 36)];
+    let quiet = diff(&now, &later);
+    assert!(quiet.entities.is_empty());
+    assert_eq!(quiet.last_input_ticks, later.last_input_ticks);
     Ok(())
 }
 
@@ -481,6 +519,7 @@ fn deltas_are_ten_times_smaller_when_five_percent_move() {
             color: Some([0.55, 0.38, 0.2, 1.0]),
             texture: None,
             owner: None,
+            mover: None,
         }
     };
     let at_tick = |tick| Snapshot {
@@ -488,6 +527,7 @@ fn deltas_are_ten_times_smaller_when_five_percent_move() {
         baseline: None,
         entities: (0..1000).map(|i| prop(i, tick)).collect(),
         removed: Vec::new(),
+        last_input_ticks: Vec::new(),
     };
     let size = |snap: Snapshot| crate::net::encode(&crate::net::Message::Snapshot(snap)).len();
     let (base, now) = (at_tick(100), at_tick(101));

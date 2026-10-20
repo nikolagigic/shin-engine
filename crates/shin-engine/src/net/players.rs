@@ -80,6 +80,26 @@ impl PlayerInputs {
         self.value(player, action).axis
     }
 
+    /// The client tick of the newest [`InputFrame`] applied for `player`,
+    /// if any has been (GE-048). A local player sends no frames.
+    pub fn last_input_tick(&self, player: PlayerId) -> Option<u64> {
+        self.by_player
+            .get(&player)
+            .and_then(|input| input.last_tick)
+    }
+
+    /// Every player's [`Self::last_input_tick`], in id order, leaving out
+    /// players with none: what a snapshot carries.
+    pub(crate) fn last_input_ticks(&self) -> Vec<(PlayerId, u64)> {
+        let mut ticks: Vec<(PlayerId, u64)> = self
+            .by_player
+            .iter()
+            .filter_map(|(&player, input)| input.last_tick.map(|tick| (player, tick)))
+            .collect();
+        ticks.sort();
+        ticks
+    }
+
     /// Every player with input, in id order.
     pub fn players(&self) -> Vec<PlayerId> {
         let mut players: Vec<PlayerId> = self.by_player.keys().copied().collect();

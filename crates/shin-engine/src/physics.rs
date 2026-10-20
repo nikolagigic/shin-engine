@@ -38,9 +38,13 @@
 //! ([`RemoteEntity`]) are never simulated, even if they carry a body or
 //! collider: the server's physics moves them.
 //!
-//! Not supported (yet): joints, character controllers, trigger events,
-//! continuous collision detection, and colliders on children (compound
-//! shapes).
+//! Players walk with a [`Mover`] (GE-048, [`mover_system`]): a small
+//! kinematic character that lands on static colliders only, with
+//! movement any multiplayer client can predict (see [`mover`]).
+//!
+//! Not supported (yet): joints, general character controllers, trigger
+//! events, continuous collision detection, and colliders on children
+//! (compound shapes).
 //!
 //! rapier3d works in its own math types (glam 0.33 through `glamx`), which
 //! this module converts at the boundary; none of them appear in its public
@@ -49,6 +53,7 @@
 //! Tools: [`register_tools`] adds `physics.set_body`,
 //! `physics.set_collider`, `physics.gravity`, and `physics.raycast`.
 
+pub mod mover;
 mod tools;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -60,6 +65,7 @@ use rapier3d::pipeline::PhysicsWorld as RapierWorld;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use mover::{MoveInput, Mover, Statics, mover_system};
 pub use tools::register_tools;
 pub(crate) use tools::{body_json, collider_json};
 
