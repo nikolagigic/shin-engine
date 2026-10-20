@@ -33,13 +33,16 @@ Skills for common tasks are in `.claude/skills/`: `shin-scene-building`,
 
 ## Where things live
 
-- `shin.toml`: project name, window title and size, `entry_scene`.
+- `shin.toml`: project name, window title and size, `entry_scene`,
+  input actions, and `[net] predict` (client-side prediction, default
+  on).
 - `scenes/`: `.scene.ron` files; `scenes/main.scene.ron` loads on start.
 - `scripts/`: Rhai scripts (`fn update(entity, dt)`), attached to
   entities with `script.attach`; they hot-reload while playing. The moon
   runs `moon.rhai`. `server.rhai` (no entity) gives every player a cube
-  when they join, even solo (you are player 1), and each cube runs
-  `player.rhai` with its owner's input.
+  when they join, even solo (you are player 1); `.mover(speed, jump)`
+  makes it walk with its owner's input (predicted on that player's
+  client), and each cube runs `player.rhai` (server-only rules).
 - `assets/`: glTF meshes, PNG/JPEG textures, and sounds (`sounds/`).
   Paths in scenes and tools are relative to the project root.
 - `src/main.rs`: systems (`game_schedule`) and game tools

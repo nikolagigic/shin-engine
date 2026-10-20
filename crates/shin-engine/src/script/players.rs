@@ -7,8 +7,10 @@
 //!   error, as with `action_axis`; a player with no input reads as at rest.
 //! - `spawn_entity()` (`spawn` is a reserved word in Rhai): a new entity,
 //!   set up by chaining `name(text)`, `mesh(source)`, `color(r, g, b)`,
-//!   `at(vec3)`, `script(path)`, `replicated(bool)`, and `owner(id)`. It
-//!   appears after the step, when the engine can upload its mesh
+//!   `at(vec3)`, `script(path)`, `replicated(bool)`, `owner(id)`, and
+//!   `mover(speed, jump_impulse)` (a [`Mover`]: it walks with its owner's
+//!   input, predicted on that player's client; GE-048). It appears after
+//!   the step, when the engine can upload its mesh
 //!   ([`apply_commands`]).
 //! - `despawn_owned(id)`: removes every entity player `id` owns (with its
 //!   children), also after the step.
@@ -28,6 +30,7 @@ use crate::asset::{AssetSource, Assets};
 use crate::ecs::{Entity, Name, Resources, World, despawn_recursive};
 use crate::math::{Transform, Vec3};
 use crate::net::{Owner, PlayerId, PlayerInputs, Replicated};
+use crate::physics::Mover;
 use crate::render::{MeshInstance, RenderState};
 
 use super::{Script, ScriptEngine};
@@ -65,6 +68,8 @@ pub(crate) struct SpawnDesc {
     replicated: bool,
     /// The player who owns it ([`Owner`]).
     owner: Option<PlayerId>,
+    /// How it walks, if it does ([`Mover`]).
+    mover: Option<Mover>,
 }
 
 impl Default for SpawnDesc {
@@ -77,6 +82,7 @@ impl Default for SpawnDesc {
             script: None,
             replicated: false,
             owner: None,
+            mover: None,
         }
     }
 }
@@ -144,6 +150,12 @@ pub(crate) fn register(
             s.0.borrow_mut().owner = Some(player_id(id)?);
             Ok::<_, Box<EvalAltResult>>(s.clone())
         })
+        .register_fn("mover", |s: &mut Spawn, speed: FLOAT, jump: FLOAT| {
+            let mover = Mover::new(speed as f32, jump as f32);
+            mover.validate().map_err(|err| format!("{err:#}"))?;
+            s.0.borrow_mut().mover = Some(mover);
+            Ok::<_, Box<EvalAltResult>>(s.clone())
+        })
         .register_fn("to_string", |s: &mut Spawn| format!("{:?}", *s.0.borrow()));
 
     engine.register_fn("despawn_owned", move |id: INT| {
@@ -168,7 +180,8 @@ fn player_id(id: INT) -> Result<PlayerId, Box<EvalAltResult>> {
 ///
 /// A spawned entity gets a [`Transform`] at its `at`, and its [`Name`],
 /// [`MeshInstance`] (the mesh resolved through the [`Assets`] resource),
-/// [`Script`], [`Replicated`], and [`Owner`] as the script set them.
+/// [`Script`], [`Replicated`], [`Owner`], and [`Mover`] as the script set
+/// them.
 ///
 /// Does nothing without a [`ScriptEngine`], or before a [`RenderState`]
 /// exists (a window creates it on its first frame): the commands wait
@@ -234,6 +247,9 @@ fn spawn(
     }
     if let Some(player) = desc.owner {
         world.insert_one(entity, Owner(player))?;
+    }
+    if let Some(mover) = desc.mover {
+        world.insert_one(entity, mover)?;
     }
     Ok(entity)
 }

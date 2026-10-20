@@ -12,6 +12,9 @@
 //! title = "demo-game"
 //! width = 1280
 //! height = 720
+//!
+//! [net]            # optional
+//! predict = true   # local-player prediction on a client (GE-048)
 //! ```
 //!
 //! [`create`] writes the starter project: `Cargo.toml`, `shin.toml` (with
@@ -21,9 +24,10 @@
 //! serves the same world, systems, and a `game.hello` tool over MCP; GE-027),
 //! `scenes/main.scene.ron` (a lit cube on a ground slab with a small moon
 //! orbiting it and a stack of five crates that physics drops onto the
-//! ground, GE-034; the project's entry scene), `scripts/player.rhai` (moves
-//! a player's cube with that player's actions) and `scripts/server.rhai`
-//! (gives each joining player a cube; GE-044), `assets/cube.gltf` +
+//! ground, GE-034; the project's entry scene), `scripts/server.rhai`
+//! (gives each joining player a cube that walks with that player's
+//! actions; GE-044, GE-048) and `scripts/player.rhai` (puts a cube that
+//! fell off the ground back on it), `assets/cube.gltf` +
 //! `assets/cube.bin`,
 //! `assets/sounds/blip.wav` + `scripts/moon.rhai` (the moon blips once per
 //! revolution; GE-036), `.mcp.json` (runs the game with `--mcp`),
@@ -74,6 +78,40 @@ pub struct Project {
     /// The `[input]` table: named actions and their bindings. Empty when
     /// the manifest has none.
     pub input: InputConfig,
+    /// The `[net]` table: multiplayer settings. The defaults when the
+    /// manifest has none.
+    pub net: NetSettings,
+}
+
+/// Multiplayer settings, the optional `[net]` table of `shin.toml`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetSettings {
+    /// Whether a client predicts its own player's movement
+    /// ([`crate::net::predict`]); default `true`. Set `predict = false`
+    /// to see the local player a round trip late, exactly as the server
+    /// has it, when debugging; the game passes it to
+    /// [`crate::net::NetClient::set_prediction`].
+    #[serde(default = "yes")]
+    pub predict: bool,
+}
+
+impl Default for NetSettings {
+    fn default() -> Self {
+        Self { predict: true }
+    }
+}
+
+impl NetSettings {
+    /// Whether these are the defaults (and `[net]` can be left out).
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `true`, for serde defaults.
+fn yes() -> bool {
+    true
 }
 
 /// The game window's initial title and size, the `[window]` table of
@@ -107,6 +145,8 @@ struct ManifestFile {
     window: WindowSettings,
     #[serde(default, skip_serializing_if = "InputConfig::is_empty")]
     input: InputConfig,
+    #[serde(default, skip_serializing_if = "NetSettings::is_default")]
+    net: NetSettings,
 }
 
 /// The `[project]` table of `shin.toml`.
@@ -130,6 +170,7 @@ impl Project {
             },
             entry_scene: None,
             input: InputConfig::default(),
+            net: NetSettings::default(),
         }
     }
 
@@ -145,6 +186,7 @@ impl Project {
             window: file.window,
             entry_scene: file.project.entry_scene,
             input: file.input,
+            net: file.net,
         })
     }
 
@@ -163,6 +205,7 @@ impl Project {
             },
             window: self.window.clone(),
             input: self.input.clone(),
+            net: self.net.clone(),
         };
         Ok(toml::to_string(&file)?)
     }
@@ -267,8 +310,10 @@ const MAIN_RS: &str = include_str!("project/template/main.rs");
 /// The project's `CLAUDE.md`, notes for agents; `{name}` is replaced by the
 /// project name.
 const CLAUDE_MD: &str = include_str!("project/template/CLAUDE.md");
-/// The starter's player script, which every player's cube runs: moves
-/// the cube with its owner's `move_x`, `move_z`, and `jump` actions of
+/// The starter's player script, which every player's cube runs on the
+/// server: puts a cube that fell off the ground back on it. The cube
+/// walks with a [`crate::physics::Mover`] that the server script gives
+/// it, driven by its owner's `move_x`, `move_z`, and `jump` actions of
 /// [`starter_input`].
 const PLAYER_RHAI: &str = include_str!("project/template/player.rhai");
 /// Where [`create`] writes the starter's player script, relative to the
@@ -601,10 +646,11 @@ title and size come from `shin.toml`, the scene from
 `scenes/main.scene.ron`, and the orbit from `orbit_system` in
 `src/main.rs`. In front of it is your own cube, which
 `scripts/server.rhai` gives every player who joins (playing alone, you
-are player 1): `scripts/player.rhai` slides it with the arrow keys or
-the left stick and lifts it while Space or the gamepad's south button
-(A / Cross) is held. Those are the `move_x`, `move_z`, and `jump`
-actions bound in `shin.toml`; rebind them there.
+are player 1): it walks with the arrow keys or the left stick and jumps
+with Space or the gamepad's south button (A / Cross), and
+`scripts/player.rhai` puts it back if it falls off the ground. Those
+are the `move_x`, `move_z`, and `jump` actions bound in `shin.toml`;
+rebind them there.
 
 ## Drive it with an agent
 
@@ -683,8 +729,8 @@ their own from `scripts/server.rhai`, moved by their own keys; a solo
 shin.toml       project name, window settings, entry scene, input actions
 src/main.rs     the game: systems, tools, window, --mcp, --serve, --host, --join
 scenes/         scene files (.scene.ron)
-scripts/        Rhai scripts (server.rhai greets players, player.rhai drives
-                their cubes, moon.rhai blips)
+scripts/        Rhai scripts (server.rhai gives players walking cubes,
+                player.rhai keeps them on the ground, moon.rhai blips)
 assets/         glTF meshes, textures, and sounds (.ogg, .wav)
 .mcp.json       runs the game with --mcp for agents
 CLAUDE.md       project notes for agents
@@ -787,6 +833,36 @@ mod tests {
             std::env::temp_dir().join(format!("shin-project-test-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn net_prediction_is_on_unless_the_manifest_turns_it_off() -> anyhow::Result<()> {
+        let dir = temp_dir("net-settings");
+        fs::create_dir_all(&dir)?;
+        let mut project = Project::new("demo");
+        project.save(&dir)?;
+        let text = fs::read_to_string(dir.join(MANIFEST))?;
+        assert!(!text.contains("[net]"), "defaults are left out: {text}");
+        assert!(Project::load(&dir)?.net.predict);
+
+        fs::write(
+            dir.join(MANIFEST),
+            format!("{text}\n[net]\npredict = false\n"),
+        )?;
+        let loaded = Project::load(&dir)?;
+        assert!(!loaded.net.predict, "`[net] predict = false` turns it off");
+        project.net.predict = false;
+        assert_eq!(loaded, project);
+        project.save(&dir)?;
+        assert!(fs::read_to_string(dir.join(MANIFEST))?.contains("predict = false"));
+
+        fs::write(
+            dir.join(MANIFEST),
+            format!("{text}\n[net]\npredikt = false\n"),
+        )?;
+        assert!(Project::load(&dir).is_err(), "unknown keys are an error");
+        fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[test]

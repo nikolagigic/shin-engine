@@ -1,28 +1,22 @@
 // The player script. scripts/server.rhai spawns one cube per player with
 // this script, owned by that player.
 //
-// It reads its owner's actions, bound in shin.toml: `move_x` and `move_z`
-// (the arrow keys or the left stick, -1..1) slide the cube over the
-// ground, and `jump` (Space or the gamepad's south button) lifts it while
-// held; let go and it settles back onto the ground. The server runs it
-// with each player's own input, whether that player is at this keyboard
-// or on another machine. Edit this file while the game runs and it
-// reloads within a second.
+// The cube walks with a mover, not with this script: `mover(3.0, 5.0)` in
+// server.rhai makes the arrow keys or the left stick (`move_x`, `move_z`)
+// slide it over the ground at 3 m/s, and Space or the gamepad's south
+// button (`jump`) jump at 5 m/s. Movers run on the server and, for each
+// player's own cube, ahead of it on that player's machine (prediction),
+// so your cube moves the moment you press a key even across a network.
+//
+// This script adds the rest of the game's rules for a player. It runs on
+// the server only, with each player's own input
+// (`player_input(entity.owner, ...)`); whatever it does to the cube
+// reaches the player as a correction. Here: walk off the ground and you
+// fall, and once you are well below it you are put back on top. Edit this
+// file while the game runs and it reloads within a second.
 fn update(entity, dt) {
-    let speed = 3.0;      // metres per second
-    let lift = 4.0;       // rise while jump is held
-    let gravity = 6.0;    // fall when it is not
-    let ground = 0.5;     // the cube's centre when resting on the slab
-
-    let player = entity.owner;
     let p = entity.transform.translation;
-    p.x += player_input(player, "move_x") * speed * dt;
-    // +1 on move_z is "forward" (ArrowUp, stick up), which is -Z here.
-    p.z -= player_input(player, "move_z") * speed * dt;
-    if player_input_pressed(player, "jump") {
-        p.y += lift * dt;
-    } else {
-        p.y = max(ground, p.y - gravity * dt);
+    if p.y < -10.0 {
+        entity.transform.translation = vec3(0.0, 0.5, 2.5);
     }
-    entity.transform.translation = p;
 }

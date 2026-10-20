@@ -63,6 +63,7 @@ files do not store them, and `Replicated` is not saved in scenes yet.
 | Name                                        | Physics bodies and colliders      |
 | Mesh, colour, and texture (by asset source) | Entities without `Replicated`     |
 | Owner (`PlayerId`)                          | Camera and light                  |
+| Mover, with its state ([Prediction](#prediction)) |                              |
 
 Scripts, sounds, and physics run on the server; clients see their effect
 through the transforms. Meshes and textures are sent by their
@@ -79,7 +80,8 @@ children. A snapshot never despawns entities it simply does not mention.
 Peers exchange a small set of messages, encoded compactly in binary:
 `Hello` (a client joining, with its protocol version and name), `Welcome`
 (the server's reply: the player id, current tick, and timestep),
-`Snapshot`, `Input`, and `Goodbye`. A client whose protocol version
+`Snapshot` (which also tells each player the newest of its `Input`s
+the server has applied), `Input`, and `Goodbye`. A client whose protocol version
 differs from the server's is turned away with a `Goodbye` that says so.
 
 Messages travel over a **transport**. The engine ships an in-process
@@ -234,6 +236,7 @@ fn on_player_join(id) {
         .name(`player ${id}`)
         .mesh("assets/cube.gltf")
         .at(vec3(1.5 * (id - 1), 0.5, 2.5))
+        .mover(3.0, 5.0)
         .script("scripts/player.rhai")
         .replicated(true)
         .owner(id);
@@ -244,28 +247,41 @@ fn on_player_leave(id) {
 }
 ```
 
-The cube's own script reads its owner's input:
+`.mover(speed, jump_impulse)` gives the cube a **mover**: it walks at
+`speed` metres per second with its owner's `move_x` and `move_z` actions,
+jumps with `jump` (starting upward at `jump_impulse` metres per second)
+when standing, falls, and lands on the ground. Its owner's client moves
+it the moment a key is pressed ([Prediction](#prediction)). The cube's
+own script adds rules that run on the server only, here putting it back
+when it falls off the ground:
 
 ```rhai
 // scripts/player.rhai
 fn update(entity, dt) {
-    let p = entity.transform.translation;
-    p.x += player_input(entity.owner, "move_x") * 3.0 * dt;
-    if player_input_pressed(entity.owner, "jump") { p.y += 4.0 * dt; }
-    entity.transform.translation = p;
+    if entity.transform.translation.y < -10.0 {
+        entity.transform.translation = vec3(0.0, 0.5, 2.5);
+    }
 }
 ```
 
-[Scripting](scripting.md#players) lists the functions. This is what a
-new project does: each player who joins gets a cube of their own in
-front of the centre cube, which they move with the arrow keys and lift
-with Space, and their cube goes when they leave. Played solo, you are
-player 1 and the same scripts give you your cube.
+A script can also read its owner's input itself with
+`player_input(entity.owner, "move_x")`; [Scripting](scripting.md#players)
+lists the functions. But movement a script makes is not predicted: the
+player sees it a round trip late. Use a mover for anything the player
+steers.
+
+This is what a new project does: each player who joins gets a cube of
+their own in front of the centre cube, which they walk with the arrow
+keys and jump with Space, and their cube goes when they leave. Played
+solo, you are player 1 and the same scripts give you your cube.
 
 Stopping play (in the editor, or `sim.stop`) puts the world back and
 forgets who joined, so the next play greets the players again.
 
-In Rust, read `PlayerInputs` from a system on the server:
+In Rust, add a mover with `world.insert_one(entity,
+shin::physics::Mover::new(3.0, 5.0))` (the schedule must run
+`mover_system`; a new project's does), or read `PlayerInputs` from a
+system on the server:
 
 ```rust
 use shin::net::{Owner, PlayerInputs};
@@ -307,6 +323,76 @@ skipped still happen.
 longer delay hides more network jitter but shows the world further in
 the past; `0` shows each snapshot as soon as it arrives, with no
 smoothing.
+
+## Prediction
+
+Interpolation is right for other players, but not for your own cube: it
+would move a full round trip after you press a key (200 ms on a 100 ms
+link), plus the interpolation delay. So a client **predicts** its own
+player: entities it owns that walk with a mover are moved on the client
+at once, in the same tick as the key press, and the server corrects them
+when it disagrees.
+
+Each client tick:
+
+1. The client sends the tick's input to the server, as always, and keeps
+   it in an **input history** together with where it predicted its cube
+   would be after it.
+2. When a snapshot arrives, it says which of the client's inputs the
+   server had applied by then (`last_input_ticks`) and where the server
+   had the cube. If that is more than 0.1 mm from where the client
+   predicted it after that same input, the client puts the cube where
+   the server had it and **replays** every input the server has not
+   applied yet, from the history. Inputs the server has applied are
+   forgotten.
+3. The client moves the cube with this tick's input.
+
+When nothing disturbs the cube, the server computes exactly what the
+client predicted, and nothing is corrected. When the server moves the
+cube some other way (a script teleports it, as the starter's
+`player.rhai` does when you fall off the ground), the client snaps to the
+server's position as soon as the snapshot showing it arrives, still ahead
+by the input the server has not seen. Lost or reordered input is
+corrected the same way.
+
+Other players' cubes are never predicted; they stay interpolated, in the
+past. The client's own cube is marked `Predicted` (a component), and
+`NetClient::corrections()` counts the corrections.
+
+### The movement contract
+
+Prediction works because a mover's step is a **pure function** of the
+input, the timestep, the mover's state (its position, settings, and
+vertical speed), and the static colliders around it. The client and the
+server run the same Rust function on the same numbers and get the same
+answer:
+
+- A mover walks along X and Z at its speed, jumps when `jump` is held
+  while it stands, falls with its own gravity (9.81 m/s² by default), and
+  lands on the highest **static** collider below it (a collider with no
+  body or a `fixed` one, such as the ground). It does not collide with
+  walls, dynamic bodies, or other players.
+- Movers are replicated with their state, so a client predicts with the
+  server's numbers.
+- The client lands its cube on its own static colliders: the ones in the
+  scene it loaded. A client must load the same scene as the server.
+- Anything else that moves an owned entity (a script, a Rust system on
+  the server, physics) is not predicted: the player sees it when the
+  snapshot arrives, as a correction. Keep such moves rare, or the
+  player's own cube will jump.
+
+### Turning prediction off
+
+To see exactly what the server sees, a round trip late (useful when
+debugging movement), turn prediction off in `shin.toml`:
+
+```toml
+[net]
+predict = false
+```
+
+A new project's `--join` passes it to `NetClient::set_prediction`. With
+prediction off, your own cube is interpolated like everyone else's.
 
 ## Over the network
 
@@ -389,5 +475,4 @@ encoding and decoding (tens of microseconds for 1000 entities).
 
 - Host and Join in the editor, and `net.*` tools to host, join, and
   inspect a session.
-- Client-side prediction for the player's own entity.
 - Delta snapshots that send only what changed.
