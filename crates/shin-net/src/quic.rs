@@ -273,7 +273,7 @@ impl Transport for QuicTransport {
 }
 
 impl Drop for QuicTransport {
-    /// Finishes every stream, waits up to [`CLOSE_GRACE`] for queued
+    /// Finishes every stream, waits up to a second for queued
     /// reliable messages to be acknowledged, then closes the endpoint.
     fn drop(&mut self) {
         let Some(runtime) = self.runtime.take() else {
