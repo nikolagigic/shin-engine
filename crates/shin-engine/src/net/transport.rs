@@ -450,7 +450,10 @@ mod tests {
     }
 
     fn input(tick: u64) -> Message {
-        Message::Input(InputFrame { tick })
+        Message::Input(InputFrame {
+            tick,
+            actions: Vec::new(),
+        })
     }
 
     /// The input ticks in `events`.

@@ -2,7 +2,9 @@
 //! `Headless` engines, a server running the starter project's scene with
 //! physics and a client joined to it over a `LoopbackTransport`, are
 //! stepped side by side and compared through `entity.list` and their
-//! rendered frames.
+//! rendered frames. Once the client joins, the starter's
+//! `scripts/server.rhai` gives it a replicated player cube on the server
+//! (GE-044), which the client must show too.
 //!
 //! - `client_matches_server_after_120_ticks`: a perfect loopback, a
 //!   snapshot every tick, no interpolation delay; after 120 ticks the
@@ -227,6 +229,13 @@ fn positions(list: &[Value]) -> HashMap<String, [f64; 3]> {
         .collect()
 }
 
+/// Whether two position sets list the same entities. The server's set
+/// grows when the client joins: the starter's `scripts/server.rhai` gives
+/// the new player a cube (GE-044).
+fn same_entities(a: &HashMap<String, [f64; 3]>, b: &HashMap<String, [f64; 3]>) -> bool {
+    a.len() == b.len() && a.keys().all(|id| b.contains_key(id))
+}
+
 /// The largest coordinate difference between two position sets with the
 /// same ids.
 fn max_difference(a: &HashMap<String, [f64; 3]>, b: &HashMap<String, [f64; 3]>) -> f64 {
@@ -273,10 +282,11 @@ fn client_converges_under_latency_and_loss() -> anyhow::Result<()> {
         assert!(ticks < 1200, "the server's crates never came to rest");
         let now = positions(&replicated_list(&reg, &mut server)?);
         let shown = positions(&replicated_list(&reg, &mut client)?);
-        if shown.len() == now.len() {
+        if same_entities(&now, &shown) {
             worst_lag = worst_lag.max(max_difference(&now, &shown));
         }
-        still = if max_difference(&now, &last) == 0.0 {
+        // An entity appearing (the client's player cube) is not still.
+        still = if same_entities(&now, &last) && max_difference(&now, &last) == 0.0 {
             still + 1
         } else {
             0
