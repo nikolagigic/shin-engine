@@ -301,7 +301,7 @@ fn two_loopback_clients_control_two_distinct_cubes() -> anyhow::Result<()> {
                 Event::Message(_, Message::Snapshot(snap)) => Some(snap),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("snapshots arrive");
         let owners: Vec<_> = last.entities.iter().map(|e| e.owner).collect();
         assert_eq!(owners, [Some(P1), Some(P2)]);

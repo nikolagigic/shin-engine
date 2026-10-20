@@ -1718,6 +1718,7 @@ mod tests {
                 "scripts/lift.rhai",
                 "scripts/moon.rhai",
                 "scripts/player.rhai",
+                "scripts/server.rhai",
             ]
         );
         let starter = core.engine.world.len();

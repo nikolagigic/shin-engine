@@ -90,25 +90,16 @@ fn update(entity, dt) {
 ## Players
 
 Every game is a server, even solo (you are player 1; under `--mcp` too).
-`scripts/server.rhai` is the server script: attached to no entity, no
-`update` needed. The engine calls, before the entity scripts of a step:
-
-- `on_player_join(id)`: once per player who joins (solo: when play
-  starts);
-- `on_player_leave(id)`: once per player who leaves.
-
-Both optional; it runs only on a server, never on a joined client.
-Functions for them and for entity scripts:
+`scripts/server.rhai` (no entity, no `update`) may define
+`on_player_join(id)` and `on_player_leave(id)`, each called once per
+join or leave, before the entity scripts; never on a joined client.
 
 ```rhai
 // scripts/server.rhai
 fn on_player_join(id) {
     spawn_entity()                    // appears after the step
-        .name(`player ${id}`)
-        .mesh("assets/cube.gltf")     // asset source
-        .color(0.2, 0.5, 0.9)         // linear RGB
-        .at(vec3(1.5 * (id - 1), 0.5, 2.5))
-        .script("scripts/player.rhai")
+        .name(`player ${id}`).mesh("assets/cube.gltf").color(0.2, 0.5, 0.9)
+        .at(vec3(1.5 * (id - 1), 0.5, 2.5)).script("scripts/player.rhai")
         .replicated(true)             // sent to clients
         .owner(id);                   // entity.owner in its script
 }
@@ -125,10 +116,8 @@ fn update(entity, dt) {
 
 To test solo: `sim.play`, `sim.step` with `{"steps": 1}` (the join
 spawns the cube), `input.set` with `{"action": "move_x", "axis": 1.0}`,
-`sim.step` again, and compare `entity.list`. `script.eval` with
-`{"source": "player_input(1, \"move_x\")"}` shows what player 1's
-script reads. `sim.stop` removes spawned entities and forgets who
-joined.
+`sim.step`, compare `entity.list`. `sim.stop` removes spawned entities
+and forgets who joined.
 
 ## Verification
 

@@ -172,7 +172,10 @@ fn unreliable_arrivals(from: &mut QuicTransport, to_peer: PeerId, to: &mut QuicT
     for tick in 0..SENT {
         from.send(
             to_peer,
-            &Message::Input(InputFrame { tick }),
+            &Message::Input(InputFrame {
+                tick,
+                actions: Vec::new(),
+            }),
             Channel::Unreliable,
         );
     }
