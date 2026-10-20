@@ -8,6 +8,7 @@
 //! cargo run -- --mcp                serve this game to an agent over MCP (stdio)
 //! cargo run -- --serve [--port N]   run a dedicated multiplayer server, no window
 //! cargo run -- --host [--port N]    play in a window and host a multiplayer game
+//! cargo run -- --join <addr>        play in a window as a client of a server
 //! ```
 //!
 //! Every mode builds the same world, systems ([`game_schedule`]), and
@@ -33,7 +34,10 @@ use shin::gpu::GpuContext;
 use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
-use shin::net::{LoopbackTransport, NetServer, ServerOptions, net_server_system};
+use shin::net::{
+    LoopbackTransport, NetClient, NetServer, ServerOptions, Transport, net_client_system,
+    net_interpolate_system, net_server_system,
+};
 use shin::physics::physics_system;
 use shin::project::Project;
 use shin::render::{RenderState, render_world};
@@ -173,6 +177,26 @@ fn server_transport(port: u16) -> Box<LoopbackTransport> {
     Box::new(LoopbackTransport::pair(0).0)
 }
 
+/// The network transport a client joins `addr` over.
+///
+/// No network transport is built into the engine yet, so joining another
+/// process is not possible: this fails, saying so. The real transport
+/// replaces this function's body.
+fn client_transport(addr: &str) -> anyhow::Result<Box<dyn Transport + Send>> {
+    anyhow::bail!(
+        "cannot join {addr}: no network transport is built into the engine yet, \
+         so a game cannot connect to another process. Joining over the network \
+         arrives with the QUIC transport."
+    )
+}
+
+/// The name this player joins with: the user's login name, or `player`.
+fn player_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "player".to_string())
+}
+
 /// Runs a dedicated server: the game's schedule on a headless engine with
 /// the project open, stepped at the fixed rate until Ctrl-C.
 fn serve(project: Project, port: u16) -> anyhow::Result<()> {
@@ -217,22 +241,40 @@ fn load_scene(
 /// systems with `res.expect::<Actions>()`. Under `--mcp`,
 /// [`Headless::load_project`] installs them for `input.set`.
 ///
-/// With `host` set to a port, the window is also a listen server: a
+/// With [`Net::Host`], the window is also a listen server: a
 /// [`NetServer`] runs in the same engine, last in the fixed schedule, and
-/// the person at the window is its local player one.
-fn run_window(project: Project, host: Option<u16>) -> anyhow::Result<()> {
+/// the person at the window is its local player one. With [`Net::Join`],
+/// it is a client: a [`NetClient`] joins the server, applies its
+/// snapshots, and interpolates the entities it replicates; the server's
+/// entities are not simulated here.
+fn run_window(project: Project, net: Net) -> anyhow::Result<()> {
     let mut schedule = game_schedule();
     schedule.add_frame("fly_camera", fly_camera_system);
-    if host.is_some() {
-        schedule.add_fixed("net_server", net_server_system);
+    match &net {
+        Net::Solo => {}
+        Net::Host(_) => {
+            schedule.add_fixed("net_server", net_server_system);
+        }
+        Net::Join(_) => {
+            schedule.add_fixed("net_client", net_client_system);
+            schedule.add_frame("net_interpolate", net_interpolate_system);
+        }
     }
     let mut game = EcsGame::new(World::new(), schedule);
-    if let Some(port) = host {
-        let opts = ServerOptions::default();
-        let mut server = NetServer::new(server_transport(port), opts.snapshot_every);
-        server.add_local_player();
-        game.resources.insert(server);
-        log::info!("hosting `{}` on port {port}", project.name);
+    match net {
+        Net::Solo => {}
+        Net::Host(port) => {
+            let opts = ServerOptions::default();
+            let mut server = NetServer::new(server_transport(port), opts.snapshot_every);
+            server.add_local_player();
+            game.resources.insert(server);
+            log::info!("hosting `{}` on port {port}", project.name);
+        }
+        Net::Join(addr) => {
+            let client = NetClient::new(client_transport(&addr)?, &player_name());
+            game.resources.insert(client);
+            log::info!("joining {addr}");
+        }
     }
     game.title = project.window.title.clone();
     add_game_resources(&mut game.resources);
@@ -271,11 +313,22 @@ fn main() -> anyhow::Result<()> {
     let project = Project::load(Path::new(ROOT))?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_mode(&args)? {
-        Mode::Window => run_window(project, None),
+        Mode::Window => run_window(project, Net::Solo),
         Mode::Mcp => serve_mcp(project),
         Mode::Serve(port) => serve(project, port),
-        Mode::Host(port) => run_window(project, Some(port)),
+        Mode::Host(port) => run_window(project, Net::Host(port)),
+        Mode::Join(addr) => run_window(project, Net::Join(addr)),
     }
+}
+
+/// The window's part in a multiplayer game.
+enum Net {
+    /// Not networked.
+    Solo,
+    /// A listen server on this port.
+    Host(u16),
+    /// A client of the server at this address.
+    Join(String),
 }
 
 /// How the game was asked to run.
@@ -288,11 +341,15 @@ enum Mode {
     Serve(u16),
     /// `--host [--port N]`: a window that is also a server on port `N`.
     Host(u16),
+    /// `--join <addr>`: a window that is a client of the server at `addr`
+    /// (`host:port`).
+    Join(String),
 }
 
 /// Reads the command line (without the program name).
 fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
-    const USAGE: &str = "usage: cargo run [-- --mcp | --serve [--port N] | --host [--port N]]";
+    const USAGE: &str =
+        "usage: cargo run [-- --mcp | --serve [--port N] | --host [--port N] | --join <host:port>]";
     let port = |rest: &[String]| -> anyhow::Result<u16> {
         match rest {
             [] => Ok(DEFAULT_PORT),
@@ -307,6 +364,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         [flag] if flag == "--mcp" => Ok(Mode::Mcp),
         [flag, rest @ ..] if flag == "--serve" => Ok(Mode::Serve(port(rest)?)),
         [flag, rest @ ..] if flag == "--host" => Ok(Mode::Host(port(rest)?)),
+        [flag, addr] if flag == "--join" && !addr.starts_with("--") => Ok(Mode::Join(addr.clone())),
         _ => anyhow::bail!(USAGE),
     }
 }

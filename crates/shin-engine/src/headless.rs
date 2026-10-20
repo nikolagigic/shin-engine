@@ -24,6 +24,7 @@ use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::input::Actions;
 use crate::math::{Camera, Projection, Transform, Vec3};
+use crate::net;
 use crate::physics::{PhysicsWorld, physics_system};
 use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
@@ -269,7 +270,9 @@ impl Headless {
     /// Runs `n` fixed steps of [`Self::fixed_dt`], advancing [`Time`]
     /// exactly as [`crate::app::EcsGame`] does (both use
     /// [`ecs::fixed_step`]). After each step the [`Actions`] resource's
-    /// `just_pressed` edges are cleared ([`Actions::end_step`]).
+    /// `just_pressed` edges are cleared ([`Actions::end_step`]), and on a
+    /// multiplayer client the snapshot that step made due is applied
+    /// ([`net::apply_pending`]; a failure is logged).
     pub fn step(&mut self, n: u32) {
         for _ in 0..n {
             ecs::fixed_step(
@@ -280,6 +283,14 @@ impl Headless {
             );
             if let Some(actions) = self.resources.get_mut::<Actions>() {
                 actions.end_step();
+            }
+            if let Err(err) = net::apply_pending(
+                &mut self.world,
+                &mut self.resources,
+                &self.gpu.device,
+                &self.gpu.queue,
+            ) {
+                log::error!("{err:#}");
             }
         }
     }

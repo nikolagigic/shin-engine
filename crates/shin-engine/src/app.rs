@@ -24,6 +24,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::ecs::{self, ExitRequest, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 use crate::input::{Actions, GamepadState, Gamepads, InputState, actions_system};
+use crate::net;
 use crate::stats::{FrameStats, frame_stats_system};
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
@@ -165,6 +166,10 @@ pub type RenderFn =
 ///
 /// Any system can end the app by setting the [`ExitRequest`] resource to
 /// `true`; the window closes after the current frame.
+///
+/// On a multiplayer client (a [`crate::net::NetClient`] resource), each
+/// frame starts by applying the snapshot the fixed steps made due
+/// ([`net::apply_pending`]), before the frame systems run.
 pub struct EcsGame {
     /// Entities and components.
     pub world: World,
@@ -303,6 +308,15 @@ impl Game for EcsGame {
         depth: &wgpu::TextureView,
         alpha: f64,
     ) {
+        // The fixed steps just ran; show the snapshot they made due.
+        if let Err(err) = net::apply_pending(
+            &mut self.world,
+            &mut self.resources,
+            &ctx.device,
+            &ctx.queue,
+        ) {
+            log::error!("{err:#}");
+        }
         self.begin_frame(alpha);
         if let Some(render_fn) = &mut self.render_fn {
             render_fn(&mut self.world, &mut self.resources, ctx, view, depth);
