@@ -160,7 +160,8 @@ impl Headless {
         }
     }
 
-    /// Stops playing: stops every sound, tears down the physics
+    /// Stops playing: ends the multiplayer session `net.host` or `net.join`
+    /// started, if any ([`crate::net::session`]), stops every sound, tears down the physics
     /// simulation, makes scripts forget which players joined (so the next
     /// play greets them again) and drop their queued spawns, restores the
     /// scene, entity ids, and [`Time`] captured by [`Self::play`], and
@@ -173,6 +174,7 @@ impl Headless {
             return Ok(false);
         };
         let snapshot = snapshot.clone();
+        crate::net::session::end(self);
         audio::stop_all(&mut self.resources);
         let spawned = scene::apply_entities(
             &mut self.world,

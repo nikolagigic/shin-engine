@@ -31,13 +31,18 @@
 //!   [`LoopbackTransport`], an in-process implementation for tests, with
 //!   simulated latency, jitter, and loss ([`LoopbackOptions`]).
 //!
-//! Tools: [`register_tools`] adds `net.status`.
+//! - [`session`]: hosting and joining on a running engine (GE-046), over
+//!   the [`Network`] in the [`Networking`] resource.
+//!
+//! Tools: [`register_tools`] adds `net.host`, `net.join`, `net.disconnect`,
+//! `net.status`, and `net.players`.
 
 pub mod client;
 pub mod players;
 pub mod predict;
 pub mod protocol;
 pub mod server;
+pub mod session;
 pub mod snapshot;
 pub mod transport;
 
@@ -62,9 +67,13 @@ pub use protocol::{
 pub use server::{
     Bandwidth, NetServer, ServerOptions, net_server_input_system, net_server_system, run_server,
 };
+pub use session::{CERT_FILE, DEFAULT_PORT, Listening, Network, Networking};
+
 pub use snapshot::{apply, capture, diff, patch};
 pub use tools::register_tools;
-pub use transport::{Channel, Event, LoopbackOptions, LoopbackTransport, PeerId, Transport};
+pub use transport::{
+    Channel, Event, LoopbackNetwork, LoopbackOptions, LoopbackTransport, PeerId, Traffic, Transport,
+};
 
 /// An entity's identity on the network: the same on the server and every
 /// client, and never reused within a session.

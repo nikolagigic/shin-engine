@@ -47,7 +47,7 @@ use shin::headless::Headless;
 use shin::input::{Actions, FlyCamera, fly_camera_system};
 use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::net::{
-    NetClient, NetServer, ServerOptions, Transport, net_client_system, net_interpolate_system,
+    NetClient, NetServer, Networking, ServerOptions, Transport, net_client_system, net_interpolate_system,
     net_server_input_system, net_server_system,
 };
 use shin::physics::{mover_system, physics_system};
@@ -56,7 +56,7 @@ use shin::render::{RenderState, render_world};
 use shin::scene;
 use shin::script::script_system;
 use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
-use shin_net::{QuicTransport, ServerTrust};
+use shin_net::{QuicNetwork, QuicTransport, ServerTrust};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -175,7 +175,8 @@ fn entry_scene(project: &Project) -> Option<PathBuf> {
 /// [`register_game_tools`], on a headless engine running [`game_schedule`]
 /// with the project (and its entry scene) open. Like a solo game it is a
 /// server with one local player, so `sim.play` gives the agent a cube
-/// that `input.set` moves.
+/// that `input.set` moves; `net.host` and `net.join` make it a real server
+/// or a client over QUIC.
 fn serve_mcp(project: Project) -> anyhow::Result<()> {
     let mut registry = ToolRegistry::with_engine_tools();
     register_game_tools(&mut registry, project.name.clone());
@@ -186,6 +187,8 @@ fn serve_mcp(project: Project) -> anyhow::Result<()> {
         let mut schedule = game_schedule();
         schedule.add_fixed("net_server", net_server_system);
         resources.insert(NetServer::solo());
+        // QUIC for `net.host` and `net.join`, so the agent can host or join.
+        resources.insert(Networking(Box::new(QuicNetwork)));
         let mut engine = Headless::from_parts(World::new(), resources, schedule, size)?;
         engine.load_project(Path::new(ROOT))?;
         Ok(engine)

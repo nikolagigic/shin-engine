@@ -442,31 +442,85 @@ game:
 - Under `--mcp` the game is a solo server, so `sim.play` greets player 1
   through `server.rhai`, `input.set` drives that player's actions, and
   `sim.step` and `render.frame` show the result.
-- `net.status` reports the engine's multiplayer role. The engine behind
-  `--mcp` plays solo, so it reports `{ "role": "none" }`. A server
-  (`--serve` or `--host`) reports its tick, the number of players, and
-  the snapshot traffic to all remote players over the last second: what
-  full snapshots would have cost (before), what was actually sent
-  (after), and how many times smaller that is (`null` until something
-  has been sent):
+- The `net.*` tools host and join from the engine itself, so an agent
+  (and the [editor](editor.md#multiplayer), and the Console) need no
+  second command line. None of them is recorded in the command history:
+  hosting and joining are not edits.
 
-  ```json
-  {
-    "role": "server",
-    "tick": 5400,
-    "players": 2,
-    "bandwidth": {
-      "full_bytes_per_s": 3190960.0,
-      "sent_bytes_per_s": 172400.0,
-      "compression_ratio": 18.5
-    }
+| Tool             | Does |
+|------------------|------|
+| `net.host`       | Starts hosting on this engine: `{ "port": 7777, "snapshot_every": 3 }` (both optional; port `0` picks a free one). The engine becomes a listen server with its own local player, and play mode starts as with `sim.play`. The certificate is saved to `target/shin-server-cert.der` in the project, where `--join --cert` finds it. |
+| `net.join`       | Joins the server at `{ "addr": "host:port" }` as a client and starts play mode; the client [predicts](#prediction) its own movers unless `shin.toml` turns it off. Trust: `"insecure": true` accepts any server (development only), `"cert_path"` trusts that certificate file, and with neither the project's `target/shin-server-cert.der` (what a host on this machine saved) is trusted. Optional `"name"` is the player name the server logs. |
+| `net.disconnect` | Ends the session: a host says goodbye to every player, a client leaves and its replicated entities are removed. Play continues. |
+| `net.status`     | The engine's role and session numbers, below. |
+| `net.players`    | Every player this engine knows of, each `{ id, local, rtt_ms }`: on a host its own player too. |
+
+`sim.stop` (and the editor's Stop) also ends a `net.host` or `net.join`
+session, so stopping always leaves `net.status` at
+`{ "role": "none" }`, and the solo server the engine had before is back.
+
+`net.status` reports `role`:
+
+- `"none"`: not networked. The engine behind `--mcp` plays solo until
+  `net.host` or `net.join`, so it reports `{ "role": "none" }`.
+- `"host"`: a listen server, from `net.host` or `--host`, with
+  `local_player` (its own player's id).
+- `"server"`: a dedicated server (`--serve`).
+- `"client"`: joined, from `net.join` or `--join`, with `state`
+  (`connecting`, `connected`, or `disconnected` and a `reason`) and
+  `player` once welcomed.
+
+Networked, it also reports the server `tick`, `players` (the players
+connected over the network, each with its round-trip time: on a server
+every client that joined, on a client itself), and `bandwidth`. A
+server's `bandwidth` has the snapshot traffic to all remote players over
+the last second: what full snapshots would have cost (before), what was
+actually sent (after), and how many times smaller that is (`null` until
+something has been sent). A `net.host` or `net.join` session adds what
+the transport carried: bytes in and out per second and bytes per tick
+over the last second (the editor's sparkline). `net.host` adds `port`
+and `cert_path`, `net.join` the `addr`:
+
+```json
+{
+  "role": "host",
+  "port": 7777,
+  "cert_path": "/home/you/mygame/target/shin-server-cert.der",
+  "tick": 5400,
+  "local_player": 1,
+  "players": [{ "id": 2, "rtt_ms": 0.4 }],
+  "bandwidth": {
+    "full_bytes_per_s": 3190960.0,
+    "sent_bytes_per_s": 172400.0,
+    "compression_ratio": 18.5,
+    "in_bytes_per_s": 4100.0,
+    "out_bytes_per_s": 181300.0,
+    "per_tick": [3120, 40, 41, 3090, 38]
   }
-  ```
+}
+```
+
+Round-trip times are QUIC's estimate (`null` on a transport that does
+not measure one).
+
+Hosting and joining need a network to make transports: the
+`shin::net::Networking` resource. A new project's `--mcp` and the editor
+install QUIC (`shin_net::QuicNetwork`); without one, `net.host` and
+`net.join` fail and say so. In your own engine:
+
+```rust,ignore
+engine.resources.insert(shin::net::Networking(Box::new(shin_net::QuicNetwork)));
+```
+
+Tests use `shin::net::LoopbackNetwork`, an in-process network where a
+server listens on a port and clients connect to it at any time; clone it
+into two engines and one can host while the other joins.
 
 The `shin-multiplayer` [agent skill](agents-skills.md) walks an agent
-through it: checking replication under `--mcp`, hosting and joining as
-two processes, reading their logs, and the common causes of a client
-that shows something different from the server.
+through it: checking replication under `--mcp`, hosting with `net.host`
+and joining from a second engine, watching the session with `net.status`
+and `net.players`, and the common causes of a client that shows
+something different from the server.
 
 ## Bandwidth
 
@@ -524,9 +578,9 @@ What multiplayer does not do yet:
   it walks with a mover; anything else that moves it arrives with the
   server's snapshot, a round trip late. There is no lag compensation for
   hits, and other players' entities are never predicted.
-- **No hosting or joining from the editor or through tools.** Servers
-  and clients are started from the command line; `net.status` reports no
-  session for an engine driven over MCP.
+- **One session per engine.** An engine hosts or joins one session at
+  a time; `net.disconnect` (or `sim.stop`) first. Several editors cannot
+  edit one scene together.
 - **Development certificates only.** No certificate authorities, NAT
   traversal, relays, or browser transports.
 - **`Replicated` is not saved in scene files**; mark entities in code

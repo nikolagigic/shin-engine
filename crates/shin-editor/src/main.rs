@@ -5,8 +5,8 @@
 //! ```
 //!
 //! Opens the project in `<project-dir>` (its `shin.toml` names the window)
-//! with docked Viewport, Scene, Assets, Inspector, History, Log, and
-//! Console panels. In the viewport, left-drag orbits, right-drag pans, the
+//! with docked Viewport, Scene, Assets, Inspector, History, Multiplayer,
+//! Log, and Console panels. In the viewport, left-drag orbits, right-drag pans, the
 //! wheel zooms, a click selects the entity under the pointer, and the
 //! selection's gizmo moves, rotates, or scales it (W / E / R). The
 //! toolbar's Play runs the simulation and Stop puts the scene back.
@@ -25,6 +25,7 @@ mod editor;
 mod gizmo;
 mod inspector;
 mod log_sink;
+mod multiplayer;
 mod orbit;
 mod pick;
 mod play;

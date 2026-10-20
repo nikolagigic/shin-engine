@@ -7,7 +7,10 @@
 //! engine's command history ([`shin::command`], via [`crate::edit`]).
 //! Play and Stop (GE-024) use the engine's play mode
 //! ([`shin::headless::PlayState`]); while playing, a [`PlayClock`] steps the
-//! simulation every frame and edits are refused.
+//! simulation every frame and edits are refused. The engine is a solo
+//! multiplayer server ([`NetServer::solo`]) with the QUIC network
+//! installed, so Play can host and the Multiplayer panel can join
+//! ([`crate::multiplayer`], GE-046).
 //! The scene's own [`Camera`] resource is left as authored (GE-030): the
 //! editor's [`OrbitCamera`] is swapped in only around the viewport render
 //! while editing, and Play renders from the scene camera as the game would.
@@ -34,6 +37,7 @@ use shin::ecs::{Entity, Name, parent_of, world_transform};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
 use shin::math::{Camera, Transform};
+use shin::net::{NetServer, Networking, net_server_input_system, net_server_system};
 use shin::physics::{Collider, ColliderShape};
 use shin::project::{Project, ProjectRoot};
 use shin::render::{MeshHandle, MeshInstance, OverlayDraw, begin_mesh_pass, render_overlay};
@@ -45,6 +49,7 @@ use crate::edit;
 use crate::gizmo::TransformGizmo;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
+use crate::multiplayer::{Multiplayer, NetView};
 use crate::orbit::OrbitCamera;
 use crate::play::{self, PlayClock};
 use crate::scene;
@@ -99,6 +104,11 @@ pub struct EditorCore {
     saved: Vec<(String, Value)>,
     /// Steps the simulation from frame times while playing (GE-024).
     clock: PlayClock,
+    /// The Multiplayer panel's fields (GE-046).
+    multiplayer: Multiplayer,
+    /// What `net.status` and `net.players` reported at the start of this
+    /// frame.
+    net: NetView,
     /// The built-in cube and sphere the collider overlay draws, loaded the
     /// first time a selected entity has a collider.
     overlay_meshes: Option<OverlayMeshes>,
@@ -133,9 +143,12 @@ impl EditorCore {
         let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
         let project = scene::open(&mut engine, project_dir)?;
         let project_dir = engine.resources.expect::<ProjectRoot>().0.clone();
+        add_networking(&mut engine);
         let clock = PlayClock::new(engine.fixed_dt);
         Ok(Self {
             clock,
+            multiplayer: Multiplayer::default(),
+            net: NetView::default(),
             egui,
             renderer: None,
             dock: ui::default_layout(),
@@ -193,6 +206,7 @@ impl EditorCore {
             self.assets.invalidate();
         }
         self.assets_docked = assets_docked;
+        self.net = NetView::read(&self.registry, &mut self.engine);
         let mut full = egui_ctx.run_ui(input, |ui| {
             EditorUi {
                 engine: &self.engine,
@@ -207,6 +221,8 @@ impl EditorCore {
                 project_dir: &self.project_dir,
                 fields: &mut self.fields,
                 scene_path: &self.scene_path,
+                multiplayer: &mut self.multiplayer,
+                net: &self.net,
                 actions: &mut actions,
                 quit: &mut self.quit,
             }
@@ -345,7 +361,16 @@ impl EditorCore {
         let engine = &mut self.engine;
         match action {
             Action::Play => {
-                engine.play()?;
+                // Host on Play (GE-046): `net.host` starts play itself.
+                if self.multiplayer.host_on_play && !engine.play_state().is_playing() {
+                    reg.call(engine, "net.host", self.multiplayer.host_args())?;
+                } else {
+                    engine.play()?;
+                }
+                self.clock.reset();
+            }
+            Action::Join(addr) => {
+                reg.call(engine, "net.join", self.multiplayer.join_args(&addr))?;
                 self.clock.reset();
             }
             Action::Pause => {
@@ -676,6 +701,20 @@ fn render_scene(
     }
 }
 
+/// Makes `engine` a solo multiplayer server, as a game run alone is, so
+/// the project's server script greets the player at the editor when Play
+/// starts, and installs the QUIC network `net.host` and `net.join` use.
+fn add_networking(engine: &mut Headless) {
+    engine.resources.insert(NetServer::solo());
+    engine
+        .schedule
+        .prepend_fixed("net_server_input", net_server_input_system);
+    engine.schedule.add_fixed("net_server", net_server_system);
+    engine
+        .resources
+        .insert(Networking(Box::new(shin_net::QuicNetwork)));
+}
+
 /// The window title for `project` before anything is edited.
 fn title(project: &Project) -> String {
     format!("{} — Shin Editor", project.window.title)
@@ -883,6 +922,7 @@ pub fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multiplayer;
     use shin::audio::AudioEngine;
     use shin::math::{Projection, Vec2, Vec3};
     use shin::project::{self, NewProjectOptions};
@@ -2297,6 +2337,198 @@ mod tests {
             before,
             "Ctrl+Z reverts the whole drag"
         );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// `net.status` on `engine`.
+    fn net_status(reg: &ToolRegistry, engine: &mut Headless) -> anyhow::Result<Value> {
+        match reg.call(engine, "net.status", json!({}))? {
+            ToolOutput::Json(status) => Ok(status),
+            other => anyhow::bail!("expected JSON, got {other:?}"),
+        }
+    }
+
+    /// The `player <n>` cubes the starter `server.rhai` spawned.
+    fn player_cubes(core: &EditorCore) -> usize {
+        core.engine
+            .world
+            .query::<&Name>()
+            .iter()
+            .filter(|name| name.0.starts_with("player "))
+            .count()
+    }
+
+    /// GE-046's editor test: with Host on Play checked, Play hosts (a
+    /// client on the same in-process network joins and sees the editor's
+    /// world), and Stop returns `net.status` to `none` with the editor
+    /// solo again. Without hosting, Play is solo: the server script still
+    /// gives the editor's player a cube.
+    #[test]
+    fn multiplayer_host_on_play_then_stop_returns_to_none() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root, _) = editor("multiplayer-host")?;
+        let net = shin::net::LoopbackNetwork::new();
+        core.engine
+            .resources
+            .insert(Networking(Box::new(net.clone())));
+        let reg = ToolRegistry::with_engine_tools();
+
+        // Solo play runs the server script for the local player.
+        core.try_run(Action::Play)?;
+        core.clock.advance(&mut core.engine, 1.0 / 60.0);
+        assert_eq!(player_cubes(&core), 1, "solo: the editor's own cube");
+        assert_eq!(net_status(&reg, &mut core.engine)?["role"], "none");
+        core.try_run(Action::Stop)?;
+        assert_eq!(player_cubes(&core), 0);
+
+        core.multiplayer.host_on_play = true;
+        core.multiplayer.port = 7777;
+        core.try_run(Action::Play)?;
+        assert!(core.engine.play_state().is_playing());
+        let status = net_status(&reg, &mut core.engine)?;
+        assert_eq!(
+            (status["role"].clone(), status["port"].clone()),
+            (json!("host"), json!(7777))
+        );
+
+        // A second engine joins the editor's session.
+        // The guest plays the same project, so it can load the cubes' mesh.
+        let mut client = Headless::open_project(&core.project_dir)?;
+        client.resources.insert(Networking(Box::new(net)));
+        reg.call(
+            &mut client,
+            "net.join",
+            json!({ "addr": "127.0.0.1:7777", "insecure": true }),
+        )?;
+        for _ in 0..8 {
+            client.step(1);
+            core.clock.advance(&mut core.engine, 1.0 / 60.0);
+        }
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert_eq!(
+            core.net.status["players"],
+            json!([{ "id": 2, "rtt_ms": null }])
+        );
+        assert_eq!(
+            core.net.players.len(),
+            2,
+            "the editor's player and the guest"
+        );
+        assert!(
+            multiplayer::status_text(&core.net.status)
+                .starts_with("Hosting on port 7777 · 1 joined"),
+            "{}",
+            multiplayer::status_text(&core.net.status)
+        );
+        assert_eq!(player_cubes(&core), 2, "a cube each");
+        let remote = client
+            .world
+            .query::<(&Name, &shin::net::RemoteEntity)>()
+            .iter()
+            .filter(|(name, _)| name.0.starts_with("player "))
+            .count();
+        assert_eq!(remote, 2, "the guest sees the editor's world");
+
+        core.try_run(Action::Stop)?;
+        assert!(!core.engine.play_state().is_playing());
+        assert_eq!(
+            net_status(&reg, &mut core.engine)?,
+            json!({ "role": "none" })
+        );
+        assert!(
+            core.engine.resources.get::<NetServer>().is_some(),
+            "solo again"
+        );
+        assert_eq!(player_cubes(&core), 0, "the scene is restored");
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert_eq!(multiplayer::status_text(&core.net.status), "Offline");
+        client.step(1);
+        assert_eq!(
+            net_status(&reg, &mut client)?["state"],
+            "disconnected",
+            "the guest was told"
+        );
+        assert!(!core.is_dirty(), "hosting is not an edit");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// The panel's Join makes the editor a client of another engine's
+    /// session; Stop leaves it and removes the replicated entities.
+    #[test]
+    fn multiplayer_join_then_stop_leaves() -> anyhow::Result<()> {
+        let (mut core, _gpu, _target, root, _) = editor("multiplayer-join")?;
+        let net = shin::net::LoopbackNetwork::new();
+        core.engine
+            .resources
+            .insert(Networking(Box::new(net.clone())));
+        let reg = ToolRegistry::with_engine_tools();
+        let mut host = Headless::new(8, 8)?;
+        host.resources.insert(Networking(Box::new(net)));
+        host.world.spawn((
+            Transform::default(),
+            shin::net::Replicated,
+            Name("crate".into()),
+        ));
+        reg.call(&mut host, "net.host", json!({ "port": 9000 }))?;
+
+        core.multiplayer.trust_any = true;
+        core.try_run(Action::Join("localhost:9000".into()))?;
+        assert!(core.engine.play_state().is_playing());
+        for _ in 0..8 {
+            host.step(1);
+            core.clock.advance(&mut core.engine, 1.0 / 60.0);
+        }
+        let status = net_status(&reg, &mut core.engine)?;
+        assert_eq!(
+            (status["role"].clone(), status["state"].clone()),
+            (json!("client"), json!("connected"))
+        );
+        assert_eq!(player_cubes(&core), 0, "a client runs no server script");
+        let remote = || {
+            core.engine
+                .world
+                .query::<&shin::net::RemoteEntity>()
+                .iter()
+                .count()
+        };
+        assert_eq!(remote(), 1, "the host's entity arrived");
+
+        core.try_run(Action::Stop)?;
+        assert_eq!(
+            net_status(&reg, &mut core.engine)?,
+            json!({ "role": "none" })
+        );
+        assert_eq!(
+            core.engine
+                .world
+                .query::<&shin::net::RemoteEntity>()
+                .iter()
+                .count(),
+            0
+        );
+        host.step(1);
+        assert_eq!(net_status(&reg, &mut host)?["players"], json!([]));
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// With the editor's own network (QUIC), Host on Play listens on a
+    /// real port and saves the certificate in the project.
+    #[test]
+    fn multiplayer_hosts_over_quic_and_saves_the_certificate() -> anyhow::Result<()> {
+        let (mut core, _gpu, _target, root, _) = editor("multiplayer-quic")?;
+        let reg = ToolRegistry::with_engine_tools();
+        core.multiplayer.host_on_play = true;
+        core.multiplayer.port = 0;
+        core.try_run(Action::Play)?;
+        let status = net_status(&reg, &mut core.engine)?;
+        assert_ne!(status["port"], 0, "{status}");
+        let cert = core.project_dir.join(shin::net::CERT_FILE);
+        assert_eq!(status["cert_path"], cert.display().to_string());
+        assert!(cert.exists());
+        core.try_run(Action::Stop)?;
+        assert_eq!(net_status(&reg, &mut core.engine)?["role"], "none");
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

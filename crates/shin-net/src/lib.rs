@@ -30,10 +30,17 @@
 //! There is no NAT traversal or relay: the server's UDP port must be
 //! reachable.
 //!
-//! The engine library does not depend on this crate; a game does.
+//! [`QuicNetwork`] is the [`shin::net::Network`] the `net.host` and
+//! `net.join` tools use: install it as the [`shin::net::Networking`]
+//! resource.
+//!
+//! The engine library does not depend on this crate; a game (and the
+//! editor) does.
 
 mod cert;
+mod network;
 mod quic;
 
 pub use cert::{ServerTrust, fingerprint};
+pub use network::QuicNetwork;
 pub use quic::QuicTransport;

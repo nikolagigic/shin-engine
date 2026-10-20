@@ -1,6 +1,6 @@
 ---
 name: shin-multiplayer
-description: Host a Shin game as a multiplayer server, join it from a second engine, and check that entities replicate and players move, using entity.list, render.frame, input.set, the server and client logs, and net.status. Use when making a game multiplayer, checking what is networked, or debugging a client that does not see what the server does.
+description: Host a Shin game as a multiplayer server, join it from a second engine, and check that entities replicate and players move, using entity.list, render.frame, input.set, net.host, net.join, net.status, net.players, net.disconnect, and the client log. Use when making a game multiplayer, checking what is networked, or debugging a client that does not see what the server does.
 ---
 
 # Hosting, joining, and checking replication
@@ -54,37 +54,50 @@ trip late. `[net] predict = false` in `shin.toml` turns prediction off.
    entity has moved. `input.set` with `{"action": "move_x", "axis": 0.0}`
    releases it. `render.frame` shows the result.
 
-4. **Host.** In a shell in the project, start the dedicated server in the
-   background: `cargo run -- --serve --port 7777`. It logs
-   `QUIC server listening on 0.0.0.0:7777` and the exact join command,
-   with the path of the certificate it saved
-   (`target/shin-server-cert.der`). `--host` instead plays in a window
-   and serves from it.
+4. **Host.** Over MCP, `net.host` with `{"port": 7777}` makes the engine
+   you are connected to a listen server (you are player 1) and starts play
+   mode. It saves the server certificate to `target/shin-server-cert.der`
+   and returns `net.status`: `"role": "host"`, `port`, and `cert_path`.
+   Under MCP nothing steps on its own, so keep calling `sim.step` while a
+   client joins. (To host outside MCP instead, run `cargo run -- --serve
+   --port 7777` in a background shell; `--host` plays in a window and
+   serves from it.)
 
-5. **Join a second engine.** In another background shell:
+5. **Join a second engine.** In a background shell in the project:
    `cargo run -- --join 127.0.0.1:7777 --cert target/shin-server-cert.der`
-   (or `--insecure` instead of `--cert`, for development only). The
-   client opens a window and logs `joined as player 2`; the server logs
-   `` `<name>` joined as player 2 ``. With no window available, the
-   repository's `cargo test -p shin-engine --test net_loopback` runs a
-   server and client in one process and compares their `entity.list`
-   and `render.frame`.
+   (or `--insecure` instead of `--cert`, for development only). Then
+   `sim.step` with `{"steps": 30}` on the host. The client opens a window
+   and logs `joined as player 2`. The other way round, with a server
+   already running, `net.join` with `{"addr": "127.0.0.1:7777"}` (it
+   trusts the project's saved certificate; add `"insecure": true`
+   without it) makes your engine the client: `net.status` goes from
+   `"state": "connecting"` to `"connected"` with your `player` after a
+   few `sim.step`s, and `entity.list` shows the server's entities.
+   With no window available, the repository's `cargo test -p
+   shin-engine --test net_loopback` runs a server and client in one
+   process and compares their `entity.list` and `render.frame`.
 
-6. **Watch the session.** Every 10 seconds the server logs the tick and
-   the player count (`net: tick 600, 2 player(s)`), and it logs each
-   join and leave. `net.status` reports the role of the engine you are
-   connected to over MCP.
+6. **Watch the session.** `net.status` on the host lists the joined
+   players with their round-trip times (`players`: `[{"id": 2,
+   "rtt_ms": 0.4}]`), the server `tick`, and `bandwidth`: bytes in and
+   out per second, bytes per tick, and the snapshot savings from deltas
+   (`compression_ratio`). `net.players` lists every player, your own
+   with `"local": true`.
 
-7. **Stop.** Ctrl-C (or kill) the client, then the server. The server
-   logs `player 2 left` and `on_player_leave` removes its entity.
+7. **Stop.** `net.disconnect` ends the session (play continues), and
+   `sim.stop` ends it and restores the scene; either way `net.status`
+   is back to `{"role": "none"}`. The host says goodbye, so the client
+   logs `the server said goodbye`; kill the client process after. A
+   server started from a shell stops with Ctrl-C; it logs `player 2
+   left` and `on_player_leave` removes that player's entity.
 
 ## Verification
 
 Replication works when, in step 1, every entity players should see is
 `replicated` with a `net_id`; in step 3 the player's entity moves under
 `input.set` and `render.frame` shows it; and in steps 5 and 6 the
-server logs the second player joining and the client shows the same
-world. Report which entities are replicated and how you checked.
+`net.status` on the host lists the second player and the client shows
+the same world. Report which entities are replicated and how you checked.
 
 ## Debugging
 
@@ -103,11 +116,13 @@ world. Report which entities are replicated and how you checked.
 
 ## Pitfalls
 
-- Run servers and clients as background processes and read their logs;
-  they run until stopped.
-- The `--mcp` engine plays solo: it runs the server's game logic with
-  you as player 1 but nobody can join it, so `net.status` reports
-  `"role": "none"` there.
+- Run game processes (`--serve`, `--join`) in the background and read
+  their logs; they run until stopped.
+- Until `net.host` or `net.join`, the `--mcp` engine plays solo: it runs
+  the server's game logic with you as player 1 but nobody can join it,
+  so `net.status` reports `"role": "none"`.
+- A host under MCP only advances when you call `sim.step`: a client
+  waiting to be welcomed needs a few steps.
 - Scripts, physics, and sounds never run on a client for server
   entities; check game logic on the server or under `--mcp`.
 - Ids in `entity.list` differ between engines; compare `net_id` and

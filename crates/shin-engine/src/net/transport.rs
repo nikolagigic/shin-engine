@@ -2,8 +2,14 @@
 //! once per frame, and [`LoopbackTransport`], an in-process implementation
 //! that needs no network. [`LoopbackOptions`] give a loopback simulated
 //! latency, jitter, and loss, deterministic from a seed (GE-043).
+//! [`LoopbackNetwork`] lets loopback clients join a listening loopback
+//! server at any time, by port, as a real network would (GE-046).
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
+
+use anyhow::Context as _;
 
 use super::protocol::{Message, decode, encode};
 
@@ -34,6 +40,15 @@ pub enum Event {
     Disconnected(PeerId),
 }
 
+/// Bytes a [`Transport`] has carried so far, over all its peers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Traffic {
+    /// Bytes sent.
+    pub sent: u64,
+    /// Bytes received.
+    pub received: u64,
+}
+
 /// A message pipe to one or more peers. Sends are queued; everything
 /// received is handed out by [`Self::poll`], which the game calls once per
 /// frame (or tick). Implementations never block.
@@ -46,6 +61,19 @@ pub trait Transport {
     fn poll(&mut self) -> Vec<Event>;
     /// The connected peers, in id order.
     fn peers(&self) -> Vec<PeerId>;
+
+    /// Bytes sent and received so far. A transport that does not count
+    /// reports zero (the default).
+    fn traffic(&self) -> Traffic {
+        Traffic::default()
+    }
+
+    /// The round-trip time to `peer`, if this transport measures one (the
+    /// default does not).
+    fn rtt(&self, peer: PeerId) -> Option<Duration> {
+        let _ = peer;
+        None
+    }
 }
 
 /// Simulated network conditions for a [`LoopbackTransport`]
@@ -186,6 +214,115 @@ pub struct LoopbackTransport {
     opts: LoopbackOptions,
     /// This end's jitter and loss draws.
     rng: Rng,
+    /// Encoded bytes sent and received.
+    traffic: Traffic,
+    /// On a server listening on a [`LoopbackNetwork`]: clients that
+    /// connected since the last poll.
+    backlog: Option<Arc<Mutex<Backlog>>>,
+}
+
+/// Clients waiting for a listening loopback server to take them in.
+struct Backlog {
+    /// Server-side links to clients not yet reported connected.
+    pending: Vec<Link>,
+    /// The id the next client gets.
+    next_peer: u32,
+}
+
+/// A loopback server listening on a [`LoopbackNetwork`] port.
+struct Listener {
+    /// The server end's inbox, which clients send into.
+    inbox: Inbox,
+    /// Where new clients wait; gone once the server end is dropped.
+    backlog: Weak<Mutex<Backlog>>,
+}
+
+/// An in-process network of [`LoopbackTransport`]s: a server end
+/// [`listen`](Self::listen)s on a port and client ends
+/// [`connect`](Self::connect) to it at any time, each reported to the
+/// server as [`Event::Connected`] on its next poll. Clones share the
+/// network, so two engines in one process (a test) can host and join.
+///
+/// Every link has the network's [`LoopbackOptions`]. A port is free again
+/// once its server end is dropped.
+#[derive(Clone, Default)]
+pub struct LoopbackNetwork {
+    /// Listening servers by port.
+    ports: Arc<Mutex<HashMap<u16, Listener>>>,
+    /// The conditions of every link.
+    opts: LoopbackOptions,
+}
+
+impl LoopbackNetwork {
+    /// An empty network with perfect links.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An empty network whose links have the conditions `opts` describe.
+    pub fn with_options(opts: LoopbackOptions) -> Self {
+        Self {
+            opts,
+            ..Self::default()
+        }
+    }
+
+    /// A server end listening on `port`, and the port (`0` picks a free
+    /// one, counting up from 1). It starts with no clients.
+    ///
+    /// Fails if a live server already listens on `port`.
+    pub fn listen(&self, port: u16) -> anyhow::Result<(LoopbackTransport, u16)> {
+        let mut ports = lock(&self.ports);
+        ports.retain(|_, listener| listener.backlog.strong_count() > 0);
+        let port = match port {
+            0 => (1..=u16::MAX)
+                .find(|p| !ports.contains_key(p))
+                .context("every loopback port is in use")?,
+            port => {
+                anyhow::ensure!(
+                    !ports.contains_key(&port),
+                    "loopback port {port} is already in use"
+                );
+                port
+            }
+        };
+        let backlog = Arc::new(Mutex::new(Backlog {
+            pending: Vec::new(),
+            next_peer: 1,
+        }));
+        let mut server = LoopbackTransport::new(Vec::new(), Inbox::default(), self.opts, PeerId(0));
+        ports.insert(
+            port,
+            Listener {
+                inbox: server.inbox.clone(),
+                backlog: Arc::downgrade(&backlog),
+            },
+        );
+        server.backlog = Some(backlog);
+        Ok((server, port))
+    }
+
+    /// A client end connected to the server listening on `port`; the
+    /// server is `PeerId(0)` to it.
+    ///
+    /// Fails if nothing listens on `port`.
+    pub fn connect(&self, port: u16) -> anyhow::Result<LoopbackTransport> {
+        let ports = lock(&self.ports);
+        let listener = ports.get(&port);
+        let backlog = listener
+            .and_then(|listener| listener.backlog.upgrade())
+            .with_context(|| format!("nothing listens on loopback port {port}"))?;
+        let server_inbox = listener.expect("upgraded above").inbox.clone();
+        let mut backlog = lock(&backlog);
+        let id = PeerId(backlog.next_peer);
+        backlog.next_peer += 1;
+        let inbox = Inbox::default();
+        backlog
+            .pending
+            .push(Link::new(id, PeerId(0), inbox.clone()));
+        let link = Link::new(PeerId(0), id, server_inbox);
+        Ok(LoopbackTransport::new(vec![link], inbox, self.opts, id))
+    }
 }
 
 impl LoopbackTransport {
@@ -227,6 +364,8 @@ impl LoopbackTransport {
             unannounced,
             opts,
             rng,
+            traffic: Traffic::default(),
+            backlog: None,
         }
     }
 
@@ -243,6 +382,7 @@ impl LoopbackTransport {
             );
             return;
         }
+        self.traffic.sent += bytes.len() as u64;
         let delay = u64::from(self.opts.latency_ticks) + self.rng.up_to(self.opts.jitter_ticks);
         let link = &mut self.links[index];
         let mut inbox = lock(&link.inbox);
@@ -260,10 +400,10 @@ impl LoopbackTransport {
     }
 }
 
-/// Locks an inbox, recovering it if another end panicked while holding it
-/// (the queue itself is always in a valid state).
-fn lock(inbox: &Inbox) -> std::sync::MutexGuard<'_, InboxState> {
-    inbox
+/// Locks shared loopback state, recovering it if another end panicked
+/// while holding it (the queues are always in a valid state).
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -285,6 +425,12 @@ impl Transport for LoopbackTransport {
 
     fn poll(&mut self) -> Vec<Event> {
         let mut events: Vec<Event> = self.unannounced.drain(..).map(Event::Connected).collect();
+        if let Some(backlog) = &self.backlog {
+            for link in std::mem::take(&mut lock(backlog).pending) {
+                events.push(Event::Connected(link.peer));
+                self.links.push(link);
+            }
+        }
         let mut arrived: Vec<InFlight> = {
             let mut inbox = lock(&self.inbox);
             inbox.polls += 1;
@@ -299,10 +445,15 @@ impl Transport for LoopbackTransport {
         arrived.sort_by_key(|p| p.due);
         for InFlight { from, packet, .. } in arrived {
             match packet {
-                Packet::Data(bytes) => match decode(&bytes) {
-                    Ok(msg) => events.push(Event::Message(from, msg)),
-                    Err(err) => log::warn!("loopback: dropping a message from {from:?}: {err:#}"),
-                },
+                Packet::Data(bytes) => {
+                    self.traffic.received += bytes.len() as u64;
+                    match decode(&bytes) {
+                        Ok(msg) => events.push(Event::Message(from, msg)),
+                        Err(err) => {
+                            log::warn!("loopback: dropping a message from {from:?}: {err:#}");
+                        }
+                    }
+                }
                 Packet::Closed => {
                     self.links.retain(|link| link.peer != from);
                     events.push(Event::Disconnected(from));
@@ -314,6 +465,10 @@ impl Transport for LoopbackTransport {
 
     fn peers(&self) -> Vec<PeerId> {
         self.links.iter().map(|link| link.peer).collect()
+    }
+
+    fn traffic(&self) -> Traffic {
+        self.traffic
     }
 }
 
@@ -413,6 +568,43 @@ mod tests {
             })
             .collect();
         assert_eq!(ticks, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_network_server_accepts_clients_that_connect_later() -> anyhow::Result<()> {
+        let net = LoopbackNetwork::new();
+        let (mut server, port) = net.listen(0)?;
+        assert!(net.listen(port).is_err(), "the port is taken");
+        assert!(net.connect(port + 1).is_err(), "nothing listens there");
+        assert_eq!(server.poll(), []);
+        let mut client = net.connect(port)?;
+        client.send(PeerId(0), &goodbye("hi"), Channel::Reliable);
+        assert_eq!(
+            server.poll(),
+            [
+                Event::Connected(PeerId(1)),
+                Event::Message(PeerId(1), goodbye("hi"))
+            ]
+        );
+        server.send(PeerId(1), &goodbye("back"), Channel::Reliable);
+        assert_eq!(messages(client.poll()), [(PeerId(0), goodbye("back"))]);
+        let bytes = encode(&goodbye("hi")).len() as u64 + encode(&goodbye("back")).len() as u64;
+        assert_eq!(server.traffic().sent + server.traffic().received, bytes);
+        assert_eq!(
+            server.traffic(),
+            Traffic {
+                sent: client.traffic().received,
+                received: client.traffic().sent
+            }
+        );
+        let second = net.connect(port)?;
+        assert_eq!(server.poll(), [Event::Connected(PeerId(2))]);
+        drop(second);
+        assert_eq!(server.poll(), [Event::Disconnected(PeerId(2))]);
+        drop(server);
+        assert!(net.connect(port).is_err(), "the server is gone");
+        assert!(net.listen(port).is_ok(), "the port is free again");
+        Ok(())
     }
 
     #[test]
